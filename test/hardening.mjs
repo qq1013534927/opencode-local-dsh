@@ -215,7 +215,15 @@ console.log('hardening regression\n')
   })
   check('13b 每个模型仍然各自上报一次结果', () => {
     const adapter = read('adapter.js')
-    assert.ok(/report\(await this\.probeOne/.test(adapter), 'each model must report its own result')
+    // Each model's own result must be reported. The result is now held in a
+    // variable first (the worker has to inspect it for an IP-level block
+    // before reporting it), so the call reads `report(result)` — but the
+    // per-model report must still be there.
+    assert.ok(
+      /report\(await this\.probeOne\(targets\[index\]\)\)/.test(adapter) ||
+        /const result = await this\.probeOne\(targets\[index\]\)[\s\S]{0,200}report\(result\)/.test(adapter),
+      'each model must report its own result',
+    )
   })
 }
 

@@ -78,7 +78,18 @@ console.log(JSON.stringify(adapter.status(), null, 2))
 // to report the refusal as a classified stream error — not to crash — and
 // that is what this test asserts.
 const refused = finish?.kind === 'error'
-const refusalCodes = ['QUOTA_EXCEEDED', 'FREE_TIER_RESTRICTED', 'RATE_LIMIT', 'AUTH', 'REGION_BLOCKED', 'MODEL_UNAVAILABLE']
+const refusalCodes = [
+  'QUOTA_EXCEEDED',
+  'FREE_TIER_RESTRICTED',
+  'RATE_LIMIT',
+  'AUTH',
+  'REGION_BLOCKED',
+  'MODEL_UNAVAILABLE',
+  // The upstream's IP-level refusal of the free lane. It is a refusal of the
+  // ADDRESS, not of the model, and the plugin's job is to classify it and
+  // stop testing — exactly what this test asserts.
+  'IP_LANE_BLOCKED',
+]
 // `finish` IS the reason object: { kind, failure: { code, message } }.
 const refusalOk = refused && refusalCodes.includes(finish?.failure?.code)
 

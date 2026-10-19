@@ -24,6 +24,7 @@ import { writeFile, mkdir } from 'node:fs/promises'
 import { OpenCodeLocalAdapter, PROVIDER_ID } from './adapter.js'
 import { Config, readSettings, toOverrides } from './config.js'
 import { makeSettingsRoutes, SETTINGS_BRIDGE_PREFIX } from './settings-bridge.js'
+import { IP_LANE_BLOCK_MESSAGE } from './wire.js'
 
 export const name = 'opencode-local'
 export { Config }
@@ -180,7 +181,16 @@ export function apply(ctx, rawConfig = {}) {
       async probe(body, onResult) {
         const ids = Array.isArray(body.ids) ? body.ids.filter((id) => typeof id === 'string' && id.length > 0) : []
         const results = await adapter.probe(ids, onResult)
-        return { ok: true, value: { results } }
+        // The block state travels with the results: if the upstream refused
+        // this IP, the card has to know even when the SSE stream was cut.
+        const ipBlock = adapter.ipBlockState()
+        return {
+          ok: true,
+          value: {
+            results,
+            ...(ipBlock.blocked ? { ipBlock: { ...ipBlock, message: IP_LANE_BLOCK_MESSAGE } } : {}),
+          },
+        }
       },
       /**
        * Re-fetch the model directory from upstream, now.

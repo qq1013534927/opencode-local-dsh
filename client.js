@@ -29,6 +29,20 @@ window.__ModuleLoader__.load({
     /** This plugin's copy namespace. */
     const NS = 'settings.opencode-local'
 
+    /**
+     * Fill `{name}` placeholders in a copy string.
+     *
+     * The host's locale service does this; the card's own fallback has to do
+     * it too, or a card rendered without the host's locale shows the raw
+     * "{count} new model(s)".
+     */
+    function interpolate(text, vars) {
+      if (typeof text !== 'string' || !vars || typeof vars !== 'object') return text
+      return text.replace(/\{(\w+)\}/g, (match, name) =>
+        Object.prototype.hasOwnProperty.call(vars, name) ? String(vars[name]) : match,
+      )
+    }
+
     const en = {
       title: 'OpenCode Local Lane',
       oneLiner: 'Your own OpenCode account lane — model visibility, availability tests, context limits.',
@@ -82,6 +96,13 @@ window.__ModuleLoader__.load({
       testAllHint: 'Probe the free models only (probing a paid model spends your account balance).',
       freePicked: 'Free models ticked; paid models hidden.',
       allPicked: 'All models ticked.',
+      probeWarn: 'Availability tests send real requests to the free lane. Repeated tests can make the upstream block this IP — the plugin therefore stops after the first block.',
+      ipBlocked: 'The upstream has blocked this IP\'s free lane.',
+      ipBlockedDetail:
+        "OpenCode's free models aren't available from your current network because we've detected abusive traffic from this IP address. This isn't related to your account. If you're on a VPN or proxy, turn it off and try again, or subscribe to OpenCode Go at https://opencode.ai/go to keep building.",
+      ipBlockedCooling: 'Availability tests are paused for {minutes} more minutes to let the block expire.',
+      ipBlockedUntil: 'The upstream has blocked this IP\'s free lane; availability tests resume at {time}.',
+      probePaused: 'Paused — the upstream blocked this IP. No requests were sent.',
     }
 
     const zh = {
@@ -137,6 +158,13 @@ window.__ModuleLoader__.load({
       testAllHint: '只测免费模型（测试付费模型会消耗你账号的余额）。',
       freePicked: '已勾选免费模型，付费模型已隐藏。',
       allPicked: '已勾选全部模型。',
+      probeWarn: '可用性测试会向免费通道发起真实请求。反复测试可能让上游封禁本机 IP——所以插件在第一次封禁后就会停下。',
+      ipBlocked: '上游已封禁本机 IP 的免费通道。',
+      ipBlockedDetail:
+        "OpenCode's free models aren't available from your current network because we've detected abusive traffic from this IP address. This isn't related to your account. If you're on a VPN or proxy, turn it off and try again, or subscribe to OpenCode Go at https://opencode.ai/go to keep building.",
+      ipBlockedCooling: '可用性测试已暂停 {minutes} 分钟，等待封禁解除。',
+      ipBlockedUntil: '上游已封禁本机 IP 的免费通道；可用性测试将在 {time} 恢复。',
+      probePaused: '已暂停——上游封禁了本机 IP，本次没有发出任何请求。',
     }
 
     // -- styles (theme tokens only) ----------------------------------------
@@ -221,7 +249,11 @@ window.__ModuleLoader__.load({
      * writes go through `form.mutate(ops, revision)`.
      */
     function OpenCodeLocalCard(props) {
-      const t = props.t ?? ((key) => (zh[key] ?? en[key] ?? key))
+      // The host's `t` takes (key, vars) and interpolates {placeholders}. The
+      // local fallback does the same, so a card rendered without the host's
+      // locale service still shows "3 new models" instead of "{count} new
+      // model(s)".
+      const t = props.t ?? ((key, vars) => interpolate(zh[key] ?? en[key] ?? key, vars))
       // The Plugins page also asks for a one-line summary (the row's subtitle).
       if (props.view === 'summary') return h('span', null, t('oneLiner'))
 
@@ -240,6 +272,13 @@ window.__ModuleLoader__.load({
       /** A catalog refresh is running (disables the update button). */
       const [updating, setUpdating] = React.useState(false)
       const [note, setNote] = React.useState('')
+      /**
+       * The upstream's IP-level block on the free lane, as the bridge reports
+       * it. While it is set the availability test sends NOTHING: the block is
+       * the answer to repeated requests from this address, so more requests
+       * would only make it last longer.
+       */
+      const [ipBlock, setIpBlock] = React.useState(null)
       /** Optimistic free-only value while the bridge round-trips (null = trust the bridge). */
       const [filterLocal, setFilterLocal] = React.useState(null)
       // Local draft of the per-model map; committed through mutate on change.
@@ -269,6 +308,7 @@ window.__ModuleLoader__.load({
           if (payload?.ok) {
             setStatus(payload.value)
             setRoster(Array.isArray(payload.value?.models) ? payload.value.models : [])
+            setIpBlock(payload.value?.ipBlock ?? null)
             setStatusError('')
           } else {
             setStatusError(payload?.message ?? 'status unavailable')
@@ -499,6 +539,13 @@ window.__ModuleLoader__.load({
             Array.isArray(ids) && ids.length > 0
               ? ids
               : ordered.filter((m) => m.free === true || isFree(m.id)).map((m) => m.id)
+          // The upstream has blocked this IP: send NOTHING. The block is the
+          // answer to repeated requests from this address, so a click during
+          // the cooldown would only keep the block alive.
+          if (ipBlock?.blocked) {
+            setNote(t('probePaused'))
+            return
+          }
           setBusy(true)
           const ticket = ++noteTicket.current
           setNote(t('testing'))
@@ -546,6 +593,12 @@ window.__ModuleLoader__.load({
                       delete next[result.id]
                       return next
                     })
+                    // The upstream refused this IP: stop here, remember the
+                    // block, and tell the user what it means.
+                    if (result.code === 'IP_LANE_BLOCKED') {
+                      setIpBlock({ blocked: true, until: Date.now() + (result.retryAfterMs ?? 0), message: result.detail })
+                      setNoteFor(ticket, t('ipBlocked'))
+                    }
                   } else if (event === 'done') {
                     setNoteFor(ticket, '')
                   } else if (event === 'failed') {
@@ -560,9 +613,11 @@ window.__ModuleLoader__.load({
             window.clearTimeout(timer)
             setBusy(false)
             setProbing({})
+            // Pick up the block state the bridge now holds.
+            void loadStatus()
           }
         },
-        [t, ordered, isFree],
+        [t, ordered, isFree, ipBlock, setNoteFor, loadStatus],
       )
 
       /** Commit the whole edited map through the bridge + the official transport. */
@@ -689,9 +744,48 @@ window.__ModuleLoader__.load({
         await persist([[['freeOnly'], next]])
       }
 
+      /**
+       * The IP-level block banner.
+       *
+       * Shown whenever the upstream has refused this address. It carries the
+       * upstream's OWN wording, because that text says the three things the
+       * user needs: it is the network address (not the account), a VPN or
+       * proxy is the likely cause, and the way out is to turn it off or
+       * subscribe.
+       */
+      const ipBlockBanner = ipBlock?.blocked
+        ? h(
+            'div',
+            {
+              style: {
+                ...S.row,
+                alignItems: 'flex-start',
+                gap: 6,
+                padding: '6px 8px',
+                borderRadius: 6,
+                border: '1px solid rgba(207,80,80,0.45)',
+                background: 'rgba(207,80,80,0.10)',
+                fontSize: 12,
+              },
+            },
+            h('span', { style: { color: 'rgb(207,80,80)', fontWeight: 600 } }, t('ipBlocked')),
+            h('span', { style: { opacity: 0.85 } }, ipBlock.message || t('ipBlockedDetail')),
+            h(
+              'span',
+              { style: { opacity: 0.75 } },
+              ipBlock.remainingMs > 0
+                ? t('ipBlockedCooling', { minutes: Math.ceil(ipBlock.remainingMs / 60000) })
+                : '',
+            ),
+          )
+        : null
+
       return h(
         'div',
         { style: S.card },
+        // The upstream's own explanation, verbatim. Shown before the toolbar
+        // so the user reads WHY the test buttons are inert.
+        ipBlockBanner,
         // status row
         h(
           'div',
@@ -717,8 +811,10 @@ window.__ModuleLoader__.load({
             'button',
             {
               style: S.button,
-              disabled: busy,
-              title: t('testAllHint'),
+              // Inert while the upstream has blocked this IP: a click would be
+              // one more request to an address it just refused.
+              disabled: busy || Boolean(ipBlock?.blocked),
+              title: ipBlock?.blocked ? t('probePaused') : t('testAllHint'),
               // Only the free models are probed: paid ones cost the account.
               onClick: () => void runProbe(ordered.filter((m) => m.free === true || isFree(m.id)).map((m) => m.id)),
             },
@@ -819,13 +915,24 @@ window.__ModuleLoader__.load({
                         : null,
                     h(
                       'button',
-                      { style: S.button, disabled: Boolean(probing[m.id]), onClick: () => void runProbe([m.id]) },
+                      {
+                        style: S.button,
+                        // Inert while the upstream has blocked this IP.
+                        disabled: Boolean(probing[m.id]) || Boolean(ipBlock?.blocked),
+                        title: ipBlock?.blocked ? t('probePaused') : undefined,
+                        onClick: () => void runProbe([m.id]),
+                      },
                       t('test'),
                     ),
                   ),
                 )
               }),
             ),
+        // A standing warning, always visible: the availability test sends
+        // REAL requests, and the upstream's answer to repeated requests from
+        // one address is to block that address. The user has to be told this
+        // BEFORE the first click, not after the block.
+        h('div', { style: { ...S.muted, maxWidth: 640 } }, t('probeWarn')),
         h('div', { style: S.row }, h('button', { style: S.button, onClick: commit }, t('save'))),
       )
     }

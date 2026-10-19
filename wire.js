@@ -82,6 +82,49 @@ export class HttpError extends Error {
   }
 }
 
+/**
+ * The upstream's IP-level free-lane refusal.
+ *
+ * The message is:
+ *
+ *   OpenCode's free models aren't available from your current network because
+ *   we've detected abusive traffic from this IP address. This isn't related
+ *   to your account. If you're on a VPN or proxy, turn it off and try again,
+ *   or subscribe to OpenCode Go at https://opencode.ai/go to keep building.
+ *
+ * This is NOT a per-model failure and NOT an account problem: the whole
+ * free lane is closed for this IP, so every model behind it answers the same
+ * way. Retrying the remaining models only adds requests to an address the
+ * upstream has already flagged, so the caller must stop instead of probing on.
+ *
+ * @param {string} text the upstream error body
+ * @returns {boolean} true when the refusal is IP-level
+ */
+export function isIpLaneBlocked(text) {
+  if (typeof text !== 'string' || text.length === 0) return false
+  // Both phrases are required: together they are the upstream's IP-level
+  // refusal and nothing else. Keying on the wording (rather than on
+  // "FreeTierError") is deliberate — the error BODY carries the message
+  // without the type name, and the message alone must be recognised.
+  return (
+    /abusive traffic from this IP address/i.test(text) &&
+    /free models aren't available from your current network/i.test(text)
+  )
+}
+
+/**
+ * The user-facing explanation for an IP-level block.
+ *
+ * It is deliberately specific: the upstream blames the network address, not
+ * the account, and it tells the user what to do about it. Repeating it
+ * verbatim beats a generic "unavailable".
+ */
+export const IP_LANE_BLOCK_MESSAGE =
+  "OpenCode's free models aren't available from your current network because " +
+  "we've detected abusive traffic from this IP address. This isn't related to your account. " +
+  'If you are on a VPN or proxy, turn it off and try again, or subscribe to OpenCode Go at ' +
+  'https://opencode.ai/go to keep building.'
+
 export function classifyError(text) {
   if (/\bRegionError\b|not available in your country/i.test(text)) return 'REGION_BLOCKED'
   // Throttling first: the lane wraps rate limits as
@@ -102,6 +145,10 @@ export function classifyError(text) {
     return 'MODEL_UNAVAILABLE'
   }
   if (/\bNotFoundError\b|\b404\b/.test(text)) return 'MODEL_UNAVAILABLE'
+  // The IP-level block gets its OWN code: every model behind the free lane
+  // answers identically, so the caller has to stop the batch instead of
+  // probing every remaining model against an address the upstream flagged.
+  if (isIpLaneBlocked(text)) return 'IP_LANE_BLOCKED'
   if (/\bFreeTierError\b|free tier can only be used from within OpenCode/i.test(text)) return 'FREE_TIER_RESTRICTED'
   if (/\b(?:401|403)\b/.test(text)) return 'AUTH'
   if (/insufficient|quota|billing|funds/i.test(text)) return 'QUOTA_EXCEEDED'

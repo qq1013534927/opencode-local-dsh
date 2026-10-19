@@ -12,7 +12,7 @@ import { ModelCatalog, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './cata
 // so a ReferenceError was thrown INSIDE that catch — it escaped probeOne,
 // escaped the probe loop, and aborted the whole batch plus the SSE route:
 // one failing model killed the entire availability test.
-import { streamChat, classifyError } from './wire.js'
+import { streamChat, classifyError, IP_LANE_BLOCK_MESSAGE } from './wire.js'
 import { resolveLocalOpencode } from './credential.js'
 
 export const PROVIDER_ID = 'opencode-local'
@@ -45,6 +45,17 @@ export const OWN_LANE_RETRY_POLICY = Object.freeze({
   maxDelayMs: 20_000,
   jitterRatio: 0.2,
 })
+
+/**
+ * How long the availability test stays refused after an IP-level block.
+ *
+ * The upstream does not publish a retry time, and the block is the answer to
+ * repeated requests from one address — so the window has to be long enough
+ * that a user who clicks "test all" five times in a row is NOT the reason the
+ * block persists. 30 minutes is a compromise: long enough to cool the
+ * address down, short enough that the card is useful again the same evening.
+ */
+export const IP_BLOCK_COOLDOWN_MS = 30 * 60_000
 
 /**
  * Token holder: resolves once; invalidation (after AUTH failure, or when the
@@ -112,6 +123,14 @@ export class OpenCodeLocalAdapter {
   #catalog
   #logger
   #tokens
+  /**
+   * When the upstream last refused the free lane for this IP.
+   *
+   * The upstream's block is the answer to "too many requests from this
+   * address", so the cure is to STOP asking for a while. Until the cooldown
+   * expires the availability test refuses to send anything, and says why.
+   */
+  #ipBlockedUntil = 0
 
   constructor(deps, explicitToken) {
     this.#logger = deps.logger
@@ -259,6 +278,7 @@ export class OpenCodeLocalAdapter {
   /** Token/catalog diagnostics for the settings page. */
   status() {
     const catalog = this.#catalog.snapshot()
+    const ipBlock = this.ipBlockState()
     return {
       tokenSource: this.#tokens.current?.source ?? 'unresolved',
       account: this.#tokens.current?.account,
@@ -271,6 +291,26 @@ export class OpenCodeLocalAdapter {
         lastError: catalog.lastError,
         ...(catalog.lastRefresh ? { lastRefresh: catalog.lastRefresh } : {}),
       },
+      // Only present while the block is in force. The card reads it to show
+      // the upstream's own explanation and to keep the test buttons inert.
+      ...(ipBlock.blocked ? { ipBlock: { ...ipBlock, message: IP_LANE_BLOCK_MESSAGE } } : {}),
+    }
+  }
+
+  /**
+   * Whether the availability test is currently refused for this IP.
+   *
+   * The upstream blocks an ADDRESS, not an account, and the block is the
+   * answer to repeated requests from that address. So the plugin does not
+   * retry: it reports the block and waits out a cooldown, and a click during
+   * the cooldown sends NOTHING.
+   */
+  ipBlockState(now = Date.now()) {
+    const until = this.#ipBlockedUntil
+    return {
+      blocked: now < until,
+      until,
+      remainingMs: Math.max(0, until - now),
     }
   }
 
@@ -286,6 +326,15 @@ export class OpenCodeLocalAdapter {
    * every free model (a dozen), and a model that hangs would have delayed
    * the whole batch by its full timeout each time. A small worker pool keeps
    * the batch short without hammering the account.
+   *
+   * THE BATCH STOPS at an IP-level block. When the upstream answers "we've
+   * detected abusive traffic from this IP address", the free lane is closed
+   * for the whole address and EVERY model behind it answers the same way.
+   * Probing the remaining models would only send more requests to an address
+   * that has already been flagged — which is how a handful of availability
+   * tests escalates into the block that caused it. The worker pool stops
+   * picking up new models, the remaining rows are reported as skipped, and
+   * the caller is told why.
    *
    * @param ids model ids to probe (empty = every visible model)
    * @param onResult per-model callback (result) => void
@@ -306,16 +355,50 @@ export class OpenCodeLocalAdapter {
         }
       }
     }
+    // A block is already in force: send NOTHING. Every click would otherwise
+    // be one more request to the address the upstream just refused, which is
+    // the behaviour that earns the block in the first place.
+    const state = this.ipBlockState()
+    if (state.blocked) {
+      for (const id of targets) {
+        report({
+          id,
+          ok: false,
+          code: 'IP_LANE_BLOCKED',
+          message: IP_LANE_BLOCK_MESSAGE,
+          latencyMs: 0,
+          retryAfterMs: state.remainingMs,
+        })
+      }
+      return results
+    }
     const limit = Math.max(1, Math.min(concurrency, targets.length))
     let next = 0
+    // Set once the upstream reports an IP-level block. The in-flight probes
+    // are allowed to finish (they were already sent) but no NEW model is
+    // picked up.
+    let ipBlocked = false
     const worker = async () => {
       for (;;) {
+        if (ipBlocked) return
         const index = next++
         if (index >= targets.length) return
-        report(await this.probeOne(targets[index]))
+        const result = await this.probeOne(targets[index])
+        if (result.code === 'IP_LANE_BLOCKED') ipBlocked = true
+        report(result)
       }
     }
     await Promise.all(Array.from({ length: limit }, worker))
+    // The models that were never reached are reported as skipped rather than
+    // silently missing, so the card can say "stopped after the IP block"
+    // instead of leaving the remaining rows without a verdict.
+    if (ipBlocked) {
+      const probed = new Set(results.map((r) => r.id))
+      for (const id of targets) {
+        if (probed.has(id)) continue
+        report({ id, ok: false, code: 'SKIPPED_IP_BLOCKED', message: 'not probed: the free lane is blocked for this IP', latencyMs: 0 })
+      }
+    }
     return results
   }
 
@@ -365,11 +448,26 @@ export class OpenCodeLocalAdapter {
       code = classifyError(String(err?.message ?? err))
       message = String(err?.message ?? err)
     }
+    // An IP-level block arms the cooldown: the upstream has closed the free
+    // lane for this ADDRESS, so the plugin stops asking for a while instead
+    // of making the block worse.
+    if (code === 'IP_LANE_BLOCKED') {
+      this.#ipBlockedUntil = Date.now() + IP_BLOCK_COOLDOWN_MS
+      this.#logger?.warn?.(
+        `opencode-local: the upstream blocked this IP's free lane; the availability test stays off for ${Math.round(IP_BLOCK_COOLDOWN_MS / 60000)} minutes`,
+      )
+      // The upstream's own wording is what the user needs to read, and it is
+      // longer than the 300-char message cap — so it is carried separately.
+      message = IP_LANE_BLOCK_MESSAGE
+    }
     return {
       id,
       ok,
       code,
       message: String(message).slice(0, 300),
+      detail: code === 'IP_LANE_BLOCKED' ? IP_LANE_BLOCK_MESSAGE : undefined,
+      // How long the cooldown runs, so the card can count it down.
+      retryAfterMs: code === 'IP_LANE_BLOCKED' ? IP_BLOCK_COOLDOWN_MS : undefined,
       sample: text.slice(0, 60),
       latencyMs: Date.now() - started,
     }

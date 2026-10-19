@@ -95,8 +95,8 @@ Click the plugin's name under **Settings → Plugins** to open its card
 | **Tick all** button | Clears every `hidden` flag so all models show again; it leaves the free-only switch alone, and that switch still filters the picker |
 | Per-model **show/hide** | Hide a model from the DSH model picker (`models.<id>.hidden`) |
 | Per-model **context / max output** | Shows the effective limit; typing a value overrides it, clearing it returns to auto (`models.<id>.contextWindow`, `maxOutput`) |
-| **Test** (per row) | Send a tiny streaming request to that model and report `OK` / `RATE_LIMIT` / `MODEL_UNAVAILABLE` / `REGION_BLOCKED` / `QUOTA_EXCEEDED` with latency |
-| **Test all** | Probe the **free models only** (a paid probe spends the account balance); results stream in **one row at a time** (SSE) |
+| **Test** (per row) | Send a tiny streaming request to that model and report `OK` / `RATE_LIMIT` / `MODEL_UNAVAILABLE` / `REGION_BLOCKED` / `QUOTA_EXCEEDED` / `IP_LANE_BLOCKED` with latency. The test sends **real** requests, and a standing warning says so — see [Availability tests and the IP block](#availability-tests-and-the-ip-block) |
+| **Test all** | Probe the **free models only** (a paid probe spends the account balance); results stream in **one row at a time** (SSE). The batch **stops at the first IP-level block** and the rest of the rows are reported as skipped |
 | **Refresh** / **Save** | Re-read the live lane status / commit the edited model map (`models.<id>.hidden`, `contextWindow`, `maxOutput`). The button is labelled **Save**; *Saved.* is the note it prints afterwards |
 | Lane status line | Credential source, account, catalog counts (free / paid), last update time |
 
@@ -230,11 +230,43 @@ English (`locale/en.json`) or 简体中文 (`locale/zh.json`). Switch in DSH set
 
 The token lives in memory only; the plugin never writes it to disk.
 
+## Availability tests and the IP block
+
+The card's **test** button sends a real request per model. The upstream's
+answer to repeated requests from one address is to block that address:
+
+> OpenCode's free models aren't available from your current network because
+> we've detected abusive traffic from this IP address. This isn't related to
+> your account. If you're on a VPN or proxy, turn it off and try again, or
+> subscribe to OpenCode Go at https://opencode.ai/go to keep building.
+
+That refusal is **not** a per-model failure and **not** an account problem —
+it closes the whole free lane for the address, so every model behind it
+answers identically. Since the block IS the answer to repeated requests, the
+plugin does the opposite of retrying:
+
+- the refusal gets its own code, `IP_LANE_BLOCKED`, so it is never confused
+  with a model that merely happens to be unavailable;
+- the probe batch **stops at the first block** — the models it never reached
+  are reported as `SKIPPED_IP_BLOCKED` instead of being asked anyway;
+- a **30-minute cooldown** then keeps the test off: a click during the
+  cooldown sends nothing at all, so a user who clicks "test all" five times
+  in a row is not the reason the block persists;
+- the card shows the upstream's own wording, because it says the three things
+  that matter: it is the network address, a VPN or proxy is the likely
+  cause, and the way out is to turn it off or subscribe.
+
+The card also carries a standing warning that the test sends real requests.
+If you hit the block, turning off the proxy/VPN is the fix; the plugin cannot
+unblock an address from the client side.
+
 ## Error codes
 
 - `429 FreeUsageLimitError`: per-account free-tier throttling; DSH retries
   automatically — switch models if it persists (quotas are per-model).
 - `403 RegionError`: the model is not offered in your region; switch models.
+- `403 FreeTierError` (IP-level): the upstream blocked this address's free
+  lane — see [Availability tests and the IP block](#availability-tests-and-the-ip-block).
 - `402 Insufficient funds`: account balance too low (paid models).
 - `bun relay produced no status line`: the Bun relay misbehaved; check `bun --version`.
 

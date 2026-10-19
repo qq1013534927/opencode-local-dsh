@@ -84,8 +84,8 @@ Bun 不可用时自动回退 Node 直连（冷门 free 模型仍可用）。
 | **全部勾选** 按钮 | 清除所有 `hidden` 标记，让全部模型重新显示；它不动只看免费开关，而那个开关仍会过滤选择器 |
 | 每个模型 **显示/隐藏** | 从 DSH 模型选择器里隐藏该模型（`models.<id>.hidden`） |
 | 每个模型 **上下文 / 最大输出** | 显示**生效值**；填入数值即覆盖，清空恢复自动（`models.<id>.contextWindow`、`maxOutput`） |
-| **测试**（每行） | 对该模型发一个极小的流式请求，返回 `OK` / `RATE_LIMIT` / `MODEL_UNAVAILABLE` / `REGION_BLOCKED` / `QUOTA_EXCEEDED` 与延迟 |
-| **全部测试** | **只测免费模型**（测试付费模型会消耗账号余额）；结果**逐个到达、逐行显示**（SSE） |
+| **测试**（每行） | 对该模型发一个极小的流式请求，返回 `OK` / `RATE_LIMIT` / `MODEL_UNAVAILABLE` / `REGION_BLOCKED` / `QUOTA_EXCEEDED` / `IP_LANE_BLOCKED` 与延迟。测试会发**真实**请求，卡片常驻一条提示说明这点——见 [可用性测试与 IP 封禁](#可用性测试与-ip-封禁) |
+| **全部测试** | **只测免费模型**（测试付费模型会消耗账号余额）；结果**逐个到达、逐行显示**（SSE）。批次在**第一次 IP 级封禁处停下**，其余行记为「已跳过」 |
 | **刷新** / **保存** | 重读实时通道状态 / 提交编辑后的模型表（`models.<id>.hidden`、`contextWindow`、`maxOutput`）。按钮文案就是**保存**，「已保存。」是保存完成后才出现的提示 |
 | 状态行 | 凭据来源、账号、目录统计（免费 / 付费）、上次更新时间 |
 
@@ -182,10 +182,37 @@ dsh plugin --profile <profile> add <本目录>
 
 token 仅保存在内存，插件不写盘。
 
+## 可用性测试与 IP 封禁
+
+卡片的**测试**按钮会对每个模型发一个真实请求。而上游对「同一地址反复请求」的回答，
+就是封掉这个地址：
+
+> OpenCode's free models aren't available from your current network because
+> we've detected abusive traffic from this IP address. This isn't related to
+> your account. If you're on a VPN or proxy, turn it off and try again, or
+> subscribe to OpenCode Go at https://opencode.ai/go to keep building.
+
+这个拒绝**不是**单个模型失效，**也不是**账号问题——它把整条免费通道对
+该地址关闭了，所以通道后面的每个模型回答都一样。既然封禁正是「反复请求」的
+后果，插件做的恰恰是**不去重试**：
+
+- 这个拒绝有独立错误码 `IP_LANE_BLOCKED`，绝不会被误当成「某个模型不可用」；
+- 探测批次在**第一次封禁处停下**——没轮到的模型记为 `SKIPPED_IP_BLOCKED`，
+  而不是照样去问；
+- 随后进入 **30 分钟冷却**：冷却期间点测试**一个请求都不发**，所以连点五次
+  「全部测试」不会让封禁一直续命；
+- 卡片直接显示上游的原话，因为它说清了三件事：出问题的是网络地址、
+  VPN/代理是可能的原因、解决办法是关掉代理或订阅。
+
+卡片还常驻一条提示：测试会发真实请求。如果真的撞上封禁，**关掉代理/VPN**
+才是解法——客户端这边没办法替上游解封。
+
 ## 错误码说明
 
 - `429 FreeUsageLimitError`：账号免费额度限流；DSH 自动重试，仍失败换模型（各模型配额独立）。
 - `403 RegionError`：该模型不向当前地区提供，换模型。
+- `403 FreeTierError`（IP 级）：上游已封禁本机地址的免费通道，
+  见 [可用性测试与 IP 封禁](#可用性测试与-ip-封禁)。
 - `402 Insufficient funds`：账号余额不足（付费模型）。
 - `bun relay produced no status line`：Bun 中继异常，检查 `bun --version`。
 

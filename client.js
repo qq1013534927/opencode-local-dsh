@@ -58,6 +58,10 @@ window.__ModuleLoader__.load({
       freeOnlyOff: 'Showing all models.',
       free: 'free',
       paid: 'paid',
+      saving: 'Saving…',
+      saveRejected: 'Save rejected by the host.',
+      saveError: 'Save failed',
+      noForm: 'Settings form unavailable.',
     }
 
     const zh = {
@@ -89,6 +93,10 @@ window.__ModuleLoader__.load({
       freeOnlyOff: '已显示全部模型。',
       free: '免费',
       paid: '付费',
+      saving: '保存中…',
+      saveRejected: '保存被宿主拒绝。',
+      saveError: '保存失败',
+      noForm: '设置表单不可用。',
     }
 
     // -- styles (theme tokens only) ----------------------------------------
@@ -152,12 +160,19 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The settings card. DSH hands it `{ state, mutate }` for the served entry;
-     * `state.value` is the settings object, `mutate` applies an update.
+     * The settings card.
+     *
+     * DSH binds `{ form, t, view }`: `form` is the served entry's
+     * `ConfigPageForm` (`{ state, mutate }`), and `view === 'summary'` asks for
+     * the row one-liner instead of the form. Reads come from `form.state.value`;
+     * writes go through `form.mutate(ops, revision)`.
      */
     function OpenCodeLocalCard(props) {
       const t = props.t ?? ((key) => (zh[key] ?? en[key] ?? key))
-      const form = props.settings ?? props
+      // The Plugins page also asks for a one-line summary (the row's subtitle).
+      if (props.view === 'summary') return h('span', null, t('oneLiner'))
+
+      const form = props.form ?? props.settings ?? {}
       const state = form.state ?? {}
       const value = state.value ?? {}
       const revision = state.revision
@@ -313,14 +328,39 @@ window.__ModuleLoader__.load({
         ? `${t('free')} ${status.counts.free} · ${t('paid')} ${status.counts.paid}`
         : ''
 
-      /** One-click free-only filter: writes `freeOnly` and re-reads the roster. */
-      const setFreeOnlyFilter = (next) => {
-        if (typeof form.mutate === 'function') {
-          void form.mutate([{ op: 'set', path: ['freeOnly'], value: next }], revision)
+      /**
+       * The free-only switch's authoritative value: the SERVED FORM's own field
+       * (what the Host wrote), falling back to the bridge status until the form
+       * has resolved. Reading the form keeps the checkbox in step with the
+       * settings store rather than with a transient local guess.
+       */
+      const freeOnlyValue = value.freeOnly !== undefined ? value.freeOnly === true : Boolean(status?.freeOnly)
+
+      /**
+       * One-click free-only filter.
+       *
+       * The write goes through the official settings transport; the result is
+       * reported so a rejected save (revision mismatch, validation) is visible
+       * instead of the checkbox silently snapping back.
+       */
+      const setFreeOnlyFilter = async (next) => {
+        if (typeof form.mutate !== 'function') {
+          setNote(t('noForm'))
+          return
         }
-        setNote(next ? t('freeOnlyOn') : t('freeOnlyOff'))
+        setNote(t('saving'))
+        try {
+          const accepted = await form.mutate([{ op: 'set', path: ['freeOnly'], value: next }], revision)
+          if (accepted === false) {
+            setNote(t('saveRejected'))
+            return
+          }
+          setNote(next ? t('freeOnlyOn') : t('freeOnlyOff'))
+        } catch (err) {
+          setNote(`${t('saveError')}: ${String(err?.message ?? err)}`)
+        }
         // The Host applies the filter live; re-read so the rows follow.
-        window.setTimeout(() => void loadStatus(), 400)
+        window.setTimeout(() => void loadStatus(), 300)
       }
 
       return h(
@@ -347,8 +387,8 @@ window.__ModuleLoader__.load({
             { style: { ...S.row, gap: 6, cursor: 'pointer' }, title: t('freeOnlyHint') },
             h('input', {
               type: 'checkbox',
-              checked: Boolean(status?.freeOnly),
-              onChange: (e) => setFreeOnlyFilter(e.target.checked),
+              checked: freeOnlyValue,
+              onChange: (e) => void setFreeOnlyFilter(e.target.checked),
             }),
             h('span', { style: S.muted }, t('freeOnly')),
             countsLine ? h('span', { style: S.muted }, `(${countsLine})`) : null,

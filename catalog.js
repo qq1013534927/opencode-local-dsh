@@ -27,16 +27,42 @@ export class ModelCatalog {
   #onRefresh
   #refreshing = null
   #tokenProvider = () => ''
+  /** Per-model settings overrides: { [modelId]: { hidden?: boolean, contextWindow?: number, maxOutput?: number, enabled?: boolean } } */
+  #overrides = {}
 
   constructor(options = {}) {
     this.#refreshSeconds = options.refreshSeconds ?? 300
     this.#freeOnly = options.freeOnly ?? true
     this.#fetchImpl = options.fetchImpl ?? fetch
     this.#onRefresh = options.onRefresh
+    this.#overrides = options.overrides ?? {}
   }
 
   setTokenProvider(fn) {
     this.#tokenProvider = fn
+  }
+
+  /**
+   * Replace the per-model settings overrides (from the settings page).
+   * Accepts the volatile settings shape: `{ [modelId]: { hidden, contextWindow, maxOutput } }`.
+   */
+  setOverrides(overrides) {
+    this.#overrides = overrides && typeof overrides === 'object' ? overrides : {}
+  }
+
+  getOverrides() {
+    return this.#overrides
+  }
+
+  /** The effective override for one model (empty object when none). */
+  #overrideFor(id) {
+    const entry = this.#overrides?.[id]
+    return entry && typeof entry === 'object' ? entry : {}
+  }
+
+  /** All live model ids the account exposes (before visibility filtering). */
+  allIds() {
+    return [...this.#models.keys()].sort()
   }
 
   refreshOnce() {
@@ -137,7 +163,8 @@ export class ModelCatalog {
     const out = []
     for (const m of this.#models.values()) {
       if (this.#freeOnly && !m.id.toLowerCase().includes('free')) continue
-      out.push(m)
+      if (this.#overrideFor(m.id).hidden === true) continue
+      out.push(this.#applyOverride(m))
     }
     return out.sort((a, b) => a.id.localeCompare(b.id))
   }
@@ -146,7 +173,42 @@ export class ModelCatalog {
     const m = this.#models.get(id)
     if (!m) return undefined
     if (this.#freeOnly && !m.id.toLowerCase().includes('free')) return undefined
-    return m
+    const override = this.#overrideFor(id)
+    if (override.hidden === true) return undefined
+    return this.#applyOverride(m)
+  }
+
+  /** Fold the settings override into a catalog entry (limits win over metadata). */
+  #applyOverride(m) {
+    const override = this.#overrideFor(m.id)
+    const contextWindow = num(override.contextWindow) ?? m.contextWindow
+    const maxOutput = num(override.maxOutput) ?? m.maxOutput
+    if (contextWindow === m.contextWindow && maxOutput === m.maxOutput) return m
+    return { ...m, contextWindow, maxOutput }
+  }
+
+  /** Every model with its visibility/override state — the settings page roster. */
+  roster() {
+    const out = []
+    for (const m of this.#models.values()) {
+      const override = this.#overrideFor(m.id)
+      if (this.#freeOnly && !m.id.toLowerCase().includes('free') && override.hidden !== false) {
+        // non-free models stay out of a free-only deployment unless explicitly shown
+        continue
+      }
+      const effective = this.#applyOverride(m)
+      out.push({
+        id: m.id,
+        hidden: override.hidden === true,
+        free: m.id.toLowerCase().includes('free'),
+        contextWindow: effective.contextWindow,
+        maxOutput: effective.maxOutput,
+        contextWindowOverridden: num(override.contextWindow) !== undefined,
+        maxOutputOverridden: num(override.maxOutput) !== undefined,
+        reasoning: effective.reasoning === true,
+      })
+    }
+    return out.sort((a, b) => a.id.localeCompare(b.id))
   }
 
   snapshot() {

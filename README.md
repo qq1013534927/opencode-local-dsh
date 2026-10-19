@@ -37,6 +37,24 @@ The plugin spawns a Bun process (`relay.mjs`) for inference — its TLS fingerpr
 matches the CLI's, reaching the healthy quota bucket. Falls back to a direct Node
 fetch when Bun is missing (cold free models still work there).
 
+## Settings card (0.3)
+
+Click the plugin's name under **Settings → Plugins** to open its card
+(the same pattern as `dsh-free-search`). The card offers:
+
+| Control | What it does |
+| --- | --- |
+| Per-model **show/hide** | Hide a model from the DSH model picker (`models.<id>.hidden`) |
+| Per-model **context / max output** | Override the discovered values; empty = auto (`models.<id>.contextWindow`, `maxOutput`) |
+| **Test** (per row) | Send a tiny streaming request to that model and report Available / Unavailable with latency |
+| **Test all** | Run the availability test across every listed model |
+| **Refresh** / **Save** | Re-read the live lane status / commit the edited model map |
+| Lane status line | Credential source, account, and catalog counts |
+
+Live state (roster, availability) rides a loopback-only bridge
+(`/api/opencode-local/settings/status`, `/probe`); settings writes go through the
+official `configForms` transport.
+
 ## Prerequisites
 
 - **OpenCode client logged in once** (desktop app or `opencode serve`).

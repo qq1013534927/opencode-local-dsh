@@ -123,6 +123,93 @@ export class OpenCodeLocalAdapter {
     await this.#catalog.refreshOnce()
   }
 
+  /** Apply settings overrides (visibility + context/output limits) live. */
+  setOverrides(overrides) {
+    this.#catalog.setOverrides(overrides)
+  }
+
+  /** The live roster for the settings page (visibility/limits per model). */
+  roster() {
+    return this.#catalog.roster()
+  }
+
+  /** Token/catalog diagnostics for the settings page. */
+  status() {
+    const catalog = this.#catalog.snapshot()
+    return {
+      tokenSource: this.#tokens.current?.source ?? 'unresolved',
+      account: this.#tokens.current?.account,
+      catalog: { total: catalog.total, exposed: catalog.exposed, status: catalog.status, lastError: catalog.lastError },
+    }
+  }
+
+  /**
+   * Availability test: send one tiny streaming request per model through the
+   * same transport inference uses, and classify the outcome.
+   *
+   * @param ids model ids to probe (empty = every visible model)
+   * @param onResult optional per-model callback for streaming progress
+   */
+  async probe(ids = [], onResult) {
+    const targets = (Array.isArray(ids) && ids.length > 0 ? ids : this.#catalog.list().map((m) => m.id)).filter(
+      (id) => typeof id === 'string' && id.length > 0,
+    )
+    const results = []
+    for (const id of targets) {
+      const started = Date.now()
+      let ok = false
+      let code = 'UNKNOWN'
+      let message = ''
+      let text = ''
+      try {
+        const token = await this.#ensureToken()
+        const prepared = await this.prepareCall(PROVIDER_ID, id)
+        for await (const chunk of prepared.stream({
+          provider: PROVIDER_ID,
+          model: id,
+          system: 'Availability probe. Follow the instruction exactly.',
+          messages: [{ role: 'user', content: [{ type: 'text', text: 'Reply with exactly: OK' }] }],
+          maxTokens: 24,
+        })) {
+          if (chunk.type === 'text-delta') text += chunk.text
+          else if (chunk.type === 'finish') {
+            if (chunk.reason?.kind === 'stop') ok = true
+            else if (chunk.reason?.kind === 'error') {
+              code = chunk.reason.failure?.code ?? 'ERROR'
+              message = chunk.reason.failure?.message ?? ''
+            } else if (chunk.reason?.kind === 'tool-calls') ok = true
+            else if (chunk.reason?.kind === 'max-tokens') ok = true
+          }
+        }
+        if (ok) {
+          code = 'OK'
+          message = ''
+        }
+        void token
+      } catch (err) {
+        code = classifyError(String(err?.message ?? err))
+        message = String(err?.message ?? err)
+      }
+      const result = {
+        id,
+        ok,
+        code,
+        message: String(message).slice(0, 300),
+        sample: text.slice(0, 60),
+        latencyMs: Date.now() - started,
+      }
+      results.push(result)
+      if (typeof onResult === 'function') {
+        try {
+          onResult(result)
+        } catch {
+          /* observer must not break the loop */
+        }
+      }
+    }
+    return results
+  }
+
   async listModels(provider) {
     try {
       await this.#ensureToken()
@@ -236,16 +323,6 @@ export class OpenCodeLocalAdapter {
             ? options.reasoning
             : undefined,
       signal: options.signal,
-    }
-  }
-
-  /** Diagnostics surface. */
-  status() {
-    const catalog = this.#catalog.snapshot()
-    return {
-      tokenSource: this.#tokens.current?.source ?? 'unresolved',
-      account: this.#tokens.current?.account,
-      catalog: { total: catalog.total, exposed: catalog.exposed, status: catalog.status },
     }
   }
 }

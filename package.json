@@ -1,18 +1,22 @@
 {
   "name": "@local/opencode-local",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "Route DSH model calls through your own OpenCode account's Zen free models — never the shared anonymous lane. Bun-relay transport matches the CLI's TLS fingerprint for the healthy quota bucket.",
+  "description": "Route DSH model calls through your own OpenCode account's Zen models — never the shared anonymous lane. Bun-relay transport matches the CLI's TLS fingerprint; settings card with per-model visibility, availability tests and context limits.",
   "type": "module",
   "main": "index.js",
   "exports": {
     ".": "./index.js",
+    "./client": "./client.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg",
     "./package.json": "./package.json"
   },
   "files": [
     "index.js",
+    "config.js",
+    "client.js",
+    "settings-bridge.js",
     "credential.js",
     "catalog.js",
     "adapter.js",
@@ -28,10 +32,22 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
     }
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.4"
   },
   "license": "MIT"
 }

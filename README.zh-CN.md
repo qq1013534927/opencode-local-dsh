@@ -1,3 +1,5 @@
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 # opencode-local — DSH 插件：走自己的 OpenCode 通道，不走共享额度
 
 在 DeepSeek Harness (DSH) 里使用**你自己账号**的 OpenCode Zen 免费模型。

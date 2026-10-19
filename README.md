@@ -1,3 +1,5 @@
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 # opencode-local — DSH plugin: your own OpenCode lane, never the shared quota
 
 Use **your own account's** OpenCode Zen free models inside DeepSeek Harness (DSH).
@@ -63,6 +65,11 @@ Or via the DSH UI: Settings → Plugins → install local bundle.
    `deepseek-v4.1-flash-free`, `longcat-2.5-preview-free`, `big-pickle`, …).
 3. Send a message and watch the streaming reply.
 4. Diagnostics: `~/.opencode-local-dsh/adapter-status.json`.
+
+## UI Language
+
+The plugin's display name and description follow DSH's UI language setting automatically:
+English (`locale/en.json`) or 简体中文 (`locale/zh.json`). Switch in DSH settings.
 
 ## Configuration (cordis.patch.yml `config` object)
 

@@ -24,30 +24,50 @@ OpenCodeLocalAdapter (native LlmAdapter, registered as `opencode-local`)
 https://opencode.ai/zen/v1  ← YOUR account token
 ```
 
-## Context overrides really work (measured)
+## What a context override actually does (measured)
 
-The card can raise a model's declared context window. That is not cosmetic —
-the upstream honours longer input than the model's own metadata advertises:
+The card can raise a model's declared context window. It changes **what DSH
+believes** — it does not raise the upstream's ceiling.
+
+`buildRequestBody()` never sends a context-window field, so the upstream's own
+gate decides what is served. The override only removes **DSH's** guard: with a
+1M declaration, DSH will assemble and send a 1M prompt, and the upstream then
+refuses it — late, after the whole prompt was sent.
 
 Needle test on `deepseek-v4.1-flash-free` with the card declaring **1,048,576**
-(its metadata says 200,000). A unique code was buried two-thirds deep in filler
-text and asked back:
+(the metadata and the running client both say 200,000). A unique code was
+buried two-thirds deep in filler text and asked back:
 
 | Sent | Upstream reported input | Code recovered |
 | --- | ---: | --- |
 | ~50k | 49,878 | ✅ |
 | ~150k | 149,598 | ✅ |
 | ~190k | 189,486 | ✅ |
-| **~210k** (past 200k) | 209,430 | ✅ |
+| **~210k** | 209,430 | ✅ |
 | **~250k** | 249,318 | ✅ |
 | ~300k | — | ❌ (request rejected) |
 
-So a 1M declaration is **usable to roughly 250k on this model** — input beyond
-the advertised 200k is genuinely processed, not silently truncated. The real
-ceiling is between 250k and 300k, not 1M, so a very large declared window trades
-a bigger prompt for a late request failure. Values in that gap are best treated
-as "the account's practical ceiling", which is why the card shows the effective
-value and lets you lower it.
+**Read the ceiling correctly: 200,000 and 256k are the same tier.** The upstream
+advertises `200,000` — a rounded-down decimal rendering of 262,144, the
+standard 256 KiB context tier (and this plugin's own
+`DEFAULT_CONTEXT_WINDOW` is 262,144). The measurement confirms it: 209,430 and
+249,318 tokens were **served**, so the enforced limit is demonstrably **not**
+200,000. The rejection bracket is (249,318, 300,000], and 262,144 sits inside
+it.
+
+So the practical ceiling for this model is the **256k tier**, and:
+
+- raising the declaration past ~262,144 buys nothing — the upstream refuses
+  the request, so a bigger declared window only trades a larger prompt for a
+  late failure;
+- the useful thing the override does is **lowering** it (to cut DSH's own
+  prompt budget) or restating the real 256k figure when the metadata
+  advertises the rounded 200,000;
+- the card shows the effective value and lets you edit it, so you can set it
+  to the number that actually matches the account's tier.
+
+The measurement itself lives in `test/needle.mjs` (re-run it after
+`node test/runtime-limit.mjs` prints the running client's own `limit`).
 
 ## Why the Bun relay
 

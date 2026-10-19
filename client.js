@@ -52,6 +52,15 @@ window.__ModuleLoader__.load({
       adopt: 'auto',
       saved: 'Saved.',
       unspecified: 'Not set',
+      updateModels: 'Update models',
+      updateModelsHint: 'Fetch the model directory from OpenCode now, instead of waiting for the background refresh, and report what changed.',
+      updating: 'Updating…',
+      updated: 'Model list is up to date.',
+      lastRefresh: 'updated',
+      updatedWith: '{count} new model(s).',
+      removedWith: '{count} model(s) removed.',
+      changedWith: '{count} model(s) changed.',
+      prunedWith: '{count} stale setting(s) cleaned up.',
       freeOnly: 'Free only',
       freeOnlyHint: 'Show only the built-in free models. Untick to see every model your account can route (including paid).',
       freeOnlyOn: 'Free-only filter on.',
@@ -98,6 +107,15 @@ window.__ModuleLoader__.load({
       adopt: '自动',
       saved: '已保存。',
       unspecified: '未设置',
+      updateModels: '更新模型',
+      updateModelsHint: '立刻从 OpenCode 拉取一次模型目录（不用等后台定时刷新），并告诉你目录有什么变化。',
+      updating: '更新中…',
+      updated: '模型列表已是最新。',
+      lastRefresh: '更新于',
+      updatedWith: '新增 {count} 个模型。',
+      removedWith: '移除 {count} 个模型。',
+      changedWith: '{count} 个模型的限制有变化。',
+      prunedWith: '清理了 {count} 条过期设置。',
       freeOnly: '只看免费',
       freeOnlyHint: '只显示内置免费模型。取消勾选即可看到你账号可路由的全部模型（含付费）。',
       freeOnlyOn: '已开启只看免费。',
@@ -253,13 +271,15 @@ window.__ModuleLoader__.load({
        * first's change.
        *
        * @param {Array<[string[], unknown]>} entries path segments + value pairs
+       * @param {Array<string[]>} unsetPaths paths to delete
        */
       const persist = React.useCallback(
-        async (entries) => {
+        async (entries, unsetPaths = []) => {
           if (typeof form.mutate !== 'function') return false
           const writable = form.state?.writable !== false
           if (!writable) return false
           const ops = entries.map(([path, value]) => ({ op: 'set', path, value }))
+          for (const path of unsetPaths) ops.push({ op: 'unset', path })
           if (ops.length === 0) return true
           try {
             const accepted = await form.mutate(ops, form.state?.revision)
@@ -522,10 +542,66 @@ window.__ModuleLoader__.load({
         ? `${t('tokenSource')}: ${status.tokenSource}${status.account ? ` · ${t('account')}: ${status.account}` : ''} · ${t('catalog')}: ${status.catalog?.exposed ?? 0}/${status.catalog?.total ?? 0}`
         : statusError || '—'
 
+      /** When the model directory was last pulled from upstream. */
+      const lastRefreshText = status?.catalog?.lastRefresh
+        ? new Date(status.catalog.lastRefresh).toLocaleTimeString()
+        : ''
+
       /** "free N · paid M" — makes the current filter's scope explicit. */
       const countsLine = status?.counts
         ? `${t('free')} ${status.counts.free} · ${t('paid')} ${status.counts.paid}`
         : ''
+
+      /**
+       * Update the model list from upstream, now.
+       *
+       * The catalog also refreshes on a timer, but a user who just noticed a
+       * missing model should not have to wait for it. This forces a round
+       * through the bridge and reports what moved, so the card can say
+       * "3 new models" instead of silently re-rendering.
+       *
+       * It also PRUNES the per-model settings map: an entry for a model the
+       * upstream catalog no longer carries is dead weight, and it would keep
+       * showing as a phantom row in this table forever. The pruned ids are
+       * removed from the local draft and from the stored settings.
+       */
+      const updateModels = React.useCallback(async () => {
+        setBusy(true)
+        setNote(t('updating'))
+        try {
+          const payload = await bridge('/refresh', {})
+          if (!payload?.ok || !payload.value) throw new Error(payload?.message ?? payload?.value?.error ?? 'refresh failed')
+          setStatus(payload.value)
+          const nextRoster = Array.isArray(payload.value.models) ? payload.value.models : []
+          setRoster(nextRoster)
+          const diff = payload.value.diff ?? {}
+          const added = Array.isArray(diff.added) ? diff.added.length : 0
+          const removed = Array.isArray(diff.removed) ? diff.removed.length : 0
+          const changed = Array.isArray(diff.changed) ? diff.changed.length : 0
+          const parts = []
+          if (added > 0) parts.push(t('updatedWith', { count: added }))
+          if (removed > 0) parts.push(t('removedWith', { count: removed }))
+          if (changed > 0) parts.push(t('changedWith', { count: changed }))
+
+          // Drop the settings of models that are no longer in the catalog.
+          const live = new Set(nextRoster.map((m) => m.id))
+          const stale = Object.keys(draft).filter((id) => !live.has(id))
+          if (stale.length > 0) {
+            const pruned = { ...draft }
+            for (const id of stale) delete pruned[id]
+            setDraft(pruned)
+            parts.push(t('prunedWith', { count: stale.length }))
+            // The stale entries are removed from the stored settings too, so
+            // they do not come back on the next start.
+            await persist([], stale.map((id) => ['models', id]))
+          }
+          setNote(parts.length > 0 ? parts.join(' · ') : t('updated'))
+        } catch (err) {
+          setNote(`${t('saveError')}: ${String(err?.message ?? err)}`)
+        } finally {
+          setBusy(false)
+        }
+      }, [t, draft, persist])
 
       /**
        * One-click free-only filter.
@@ -575,7 +651,14 @@ window.__ModuleLoader__.load({
           'div',
           { style: S.row },
           h('span', { style: S.muted }, `${t('status')}: ${statusLine}`),
+          lastRefreshText ? h('span', { style: S.muted }, `· ${t('lastRefresh')}: ${lastRefreshText}`) : null,
           h('button', { style: S.button, onClick: () => void loadStatus() }, t('refresh')),
+          // Re-fetch the model directory from upstream, now.
+          h(
+            'button',
+            { style: S.button, disabled: busy, title: t('updateModelsHint'), onClick: () => void updateModels() },
+            busy ? t('updating') : t('updateModels'),
+          ),
           // Bulk visibility: only the free models ticked (paid rows hidden), or
           // everything ticked again.
           h(

@@ -169,6 +169,30 @@ export function apply(ctx, rawConfig = {}) {
         return { ok: true, value: { results } }
       },
       /**
+       * Re-fetch the model directory from upstream, now.
+       *
+       * The card's "update models" button: it forces a catalog round instead
+       * of waiting for the background timer, and reports what moved so the
+       * card can say "3 new models" rather than silently re-rendering.
+       */
+      async refresh() {
+        const result = await adapter.refreshModelsNow()
+        return {
+          ok: result.ok !== false,
+          value: {
+            ...adapter.status(),
+            models: adapter.roster(),
+            diff: {
+              added: result.added ?? [],
+              removed: result.removed ?? [],
+              changed: result.changed ?? [],
+            },
+            ...(result.error ? { error: result.error } : {}),
+            ...(result.lastRefresh ? { lastRefresh: result.lastRefresh } : {}),
+          },
+        }
+      },
+      /**
        * Apply filter/visibility changes directly to the running adapter.
        *
        * This is the switch's reliable path: it does not depend on the served

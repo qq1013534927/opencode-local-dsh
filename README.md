@@ -69,6 +69,7 @@ Click the plugin's name under **Settings → Plugins** to open its card
 
 | Control | What it does |
 | --- | --- |
+| **Update models** button | Pulls the model directory from OpenCode **now** (instead of waiting for the background refresh) and reports what moved: how many models appeared, disappeared or changed their limits. It also **prunes stale settings** — the `models.<id>` entry of a model the upstream catalog dropped is deleted, so no ghost row is left in the table |
 | **Free only** toggle | **Checked on a fresh install** — filters the DSH picker *and* the card's table down to the built-in free models. It writes `freeOnly` and nothing else: no model is ticked, hidden or unhidden by it. Untick it to list **every model your account can route** again (paid included — minus any row you hid yourself). The label tracks the table: `Showing N/M · filtered by free-only` or `Showing M · all` |
 | **Tick free only** button | Explicitly hides every paid model (`models.<id>.hidden`) **and** turns the free-only filter on — both land in ONE atomic write, so neither can overwrite the other |
 | **Tick all** button | Clears every `hidden` flag so all models show again; it leaves the free-only switch alone, and that switch still filters the picker |
@@ -77,7 +78,7 @@ Click the plugin's name under **Settings → Plugins** to open its card
 | **Test** (per row) | Send a tiny streaming request to that model and report `OK` / `RATE_LIMIT` / `MODEL_UNAVAILABLE` / `REGION_BLOCKED` / `QUOTA_EXCEEDED` with latency |
 | **Test all** | Probe the **free models only** (a paid probe spends the account balance); results stream in **one row at a time** (SSE) |
 | **Refresh** / **Save** | Re-read the live lane status / commit the edited model map (`models.<id>.hidden`, `contextWindow`, `maxOutput`). The button is labelled **Save**; *Saved.* is the note it prints afterwards |
-| Lane status line | Credential source, account, and catalog counts (free / paid) |
+| Lane status line | Credential source, account, catalog counts (free / paid), last update time |
 
 ### Filtering vs. hiding
 
@@ -106,6 +107,30 @@ survive a restart is the settings page's official write path (`form.mutate`):
 the bridge moves the **running** adapter at once, the official transport makes
 the choice **stick across restarts**.
 
+### Updating the model list
+
+The model directory has three sources: Zen's `/v1/models` (which models exist),
+`models.opencode.ai` (each model's context/output limits), and the **running
+OpenCode client's own `/api/model`** (the authoritative limits). The plugin
+refreshes in the background every `refreshSeconds` (300 by default), but
+**Update models** pulls a round **right now** instead of making you wait.
+
+Pressing it does three things:
+
+1. Re-fetches the upstream directory (both `/api/model` and
+   `models.opencode.ai`).
+2. Compares before and after and reports how many models were **added**,
+   **removed**, or **changed their limits** — when nothing moved it says
+   "Model list is up to date."
+3. **Prunes stale settings**: the `models.<id>` entry of a model the upstream
+   catalog dropped is deleted (`op: unset`), so the table no longer keeps a
+   ghost row for a model that no longer exists. This also fixes the case where
+   upstream changed a model's limits while the card still showed the old
+   values — the limits are re-read on every refresh now.
+
+Step 3 writes settings (only when there IS a leftover entry for a model that
+left the catalog), so it counts as a settings change.
+
 ### Model scope
 
 The card lists the models of the **`opencode` lane** the running client can
@@ -120,11 +145,11 @@ Context/output values on the card are therefore the real per-model limits, not
 a blanket default.
 
 Live state and writes ride a loopback-only bridge
-(`/api/opencode-local/settings/status`, `/filter`, `/probe` — the latter is an
-SSE stream): the card applies filter/visibility changes straight to the running
-adapter and only then persists them through the official settings transport
-(when the host serves a writable form). A click therefore always takes effect,
-even when that form cannot be written.
+(`/api/opencode-local/settings/status`, `/filter`, `/refresh`, `/probe` — the
+latter is an SSE stream): the card applies filter/visibility changes straight
+to the running adapter and only then persists them through the official
+settings transport (when the host serves a writable form). A click therefore
+always takes effect, even when that form cannot be written.
 
 ## Prerequisites
 

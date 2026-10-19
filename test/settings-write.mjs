@@ -43,6 +43,8 @@ async function call(path, body) {
         ...(token ? { authorization: `Bearer ${token}` } : {}),
       },
       body: JSON.stringify(body ?? {}),
+      // A stalled server must not hang the suite.
+      signal: AbortSignal.timeout(10_000),
     })
     const text = await res.text()
     let parsed
@@ -88,6 +90,7 @@ const namespaces = Array.isArray(describe.parsed?.namespaces)
 console.log('namespaces:', JSON.stringify(namespaces)?.slice(0, 400))
 
 console.log('\nDONE')
-// Let the process end naturally: a hard exit while a socket is still closing
-// trips a libuv assertion on Windows.
+// The fetch socket can keep the event loop alive on Windows; the hard exit
+// used to trip a libuv assertion, so ask the loop to end instead.
 process.exitCode = 0
+setTimeout(() => process.exit(0), 50).unref?.()

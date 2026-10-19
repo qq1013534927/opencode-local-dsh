@@ -35,6 +35,8 @@ export class ModelCatalog {
   #runtimeSource = null
   /** Per-model settings overrides: { [modelId]: { hidden?: boolean, contextWindow?: number, maxOutput?: number, enabled?: boolean } } */
   #overrides = {}
+  /** The ids the upstream Zen catalog carried on the last successful round. */
+  #previousIds = new Set()
 
   constructor(options = {}) {
     this.#refreshSeconds = options.refreshSeconds ?? 300
@@ -57,6 +59,11 @@ export class ModelCatalog {
    */
   setRuntimeSource(source) {
     this.#runtimeSource = source && typeof source === 'object' ? source : null
+  }
+
+  /** The runtime source currently in use (the running OpenCode server). */
+  runtimeSource() {
+    return this.#runtimeSource
   }
 
   /** Fold cached metadata into every known model (runtime limits win). */
@@ -133,13 +140,35 @@ export class ModelCatalog {
         const meta = this.#metaCache.get(id)
         this.#models.set(id, meta ? { ...m, ...pickPresent(meta) } : m)
       }
+      // Prune ids the upstream catalog dropped. Only ids the upstream catalog
+      // itself carried are pruned — models the local runtime contributed
+      // (paid lane ids) are not in this set and must survive.
+      for (const id of this.#previousIds) {
+        if (!fresh.has(id)) this.#models.delete(id)
+      }
       this.#failed = false
       this.#lastRefresh = Date.now()
       this.#lastError = ''
+      this.#previousIds = new Set(fresh.keys())
+      return { ok: true }
     } catch (err) {
       this.#failed = true
       this.#lastError = err instanceof Error ? err.message : String(err)
+      return { ok: false, error: this.#lastError }
     }
+  }
+
+  /**
+   * The catalog's current entries, for diffing against a previous snapshot.
+   *
+   * @returns {Map<string, {contextWindow?: number, maxOutput?: number}>}
+   */
+  entries() {
+    const out = new Map()
+    for (const [id, m] of this.#models) {
+      out.set(id, { contextWindow: num(m.contextWindow), maxOutput: num(m.maxOutput) })
+    }
+    return out
   }
 
   /**
@@ -252,10 +281,14 @@ export class ModelCatalog {
           const prior = this.#metaCache.get(id) ?? {}
           const limit = m.limit ?? {}
           const modalities = m.modalities ?? {}
-          // runtime limits win; the feed fills the gaps
+          // The public feed's own values are re-read every round, so a limit
+          // that upstream CHANGES is picked up. Only the RUNTIME limits (the
+          // authoritative source) outrank the feed — and they are applied
+          // separately, in refreshRuntimeLimits().
+          const runtime = this.#runtimeLimits.get(id) ?? {}
           this.#metaCache.set(id, {
-            contextWindow: prior.contextWindow ?? num(limit.context),
-            maxOutput: prior.maxOutput ?? num(limit.output),
+            contextWindow: runtime.contextWindow ?? num(limit.context) ?? prior.contextWindow,
+            maxOutput: runtime.maxOutput ?? num(limit.output) ?? prior.maxOutput,
             reasoning: prior.reasoning ?? m.reasoning === true,
             effortValues: prior.effortValues?.length ? prior.effortValues : decodeEffortValues(m.reasoning_options),
             inputModalities: prior.inputModalities ?? decodeModalities(modalities.input),

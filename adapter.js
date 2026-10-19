@@ -129,6 +129,59 @@ export class OpenCodeLocalAdapter {
     await this.#catalog.refreshOnce()
   }
 
+  /**
+   * Re-fetch the account's model directory from upstream, now.
+   *
+   * This is what the card's "update models" button calls: the catalog also
+   * refreshes on a timer, but that timer can be minutes away from the moment
+   * the user notices a missing model. The round is forced (the catalog's
+   * in-flight guard is bypassed) and reports WHAT changed, so the card can
+   * say "3 new models" instead of silently re-rendering.
+   *
+   * @returns {Promise<{ok: boolean, added: string[], removed: string[], changed: object[], error?: string, lastRefresh?: string}>}
+   */
+  async refreshModelsNow() {
+    const before = this.#catalog.entries()
+    try {
+      await this.#ensureToken()
+      await this.#catalog.refreshModels()
+      await this.#catalog.refreshMetadata()
+      await this.#catalog.refreshRuntimeLimits(this.#catalog.runtimeSource()).catch(() => {})
+    } catch (err) {
+      return {
+        ok: false,
+        added: [],
+        removed: [],
+        changed: [],
+        error: err instanceof Error ? err.message : String(err),
+      }
+    }
+    const after = this.#catalog.entries()
+    const added = []
+    const removed = []
+    const changed = []
+    for (const [id, m] of after) {
+      const prior = before.get(id)
+      if (!prior) {
+        added.push(id)
+        continue
+      }
+      if (prior.contextWindow !== m.contextWindow || prior.maxOutput !== m.maxOutput) {
+        changed.push({ id, contextWindow: m.contextWindow, maxOutput: m.maxOutput })
+      }
+    }
+    for (const id of before.keys()) {
+      if (!after.has(id)) removed.push(id)
+    }
+    return {
+      ok: true,
+      added: added.sort(),
+      removed: removed.sort(),
+      changed,
+      lastRefresh: this.#catalog.snapshot().lastRefresh,
+    }
+  }
+
   /** Apply settings overrides (visibility + context/output limits) live. */
   setOverrides(overrides) {
     this.#catalog.setOverrides(overrides)
@@ -157,7 +210,13 @@ export class OpenCodeLocalAdapter {
       account: this.#tokens.current?.account,
       freeOnly: this.#catalog.freeOnlyEnabled(),
       counts: this.#catalog.counts(),
-      catalog: { total: catalog.total, exposed: catalog.exposed, status: catalog.status, lastError: catalog.lastError },
+      catalog: {
+        total: catalog.total,
+        exposed: catalog.exposed,
+        status: catalog.status,
+        lastError: catalog.lastError,
+        ...(catalog.lastRefresh ? { lastRefresh: catalog.lastRefresh } : {}),
+      },
     }
   }
 

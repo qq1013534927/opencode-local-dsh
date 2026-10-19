@@ -78,6 +78,15 @@ globalThis.fetch = async (url, init = {}) => {
   const body = init.body ? JSON.parse(init.body) : {}
   calls.push({ url: target, body })
   if (target.endsWith('/status')) return jsonResponse(statusPayload())
+  if (target.endsWith('/refresh')) {
+    return jsonResponse({
+      ok: true,
+      value: {
+        ...statusPayload().value,
+        diff: { added: ['brand-new-free'], removed: [], changed: [] },
+      },
+    })
+  }
   if (target.endsWith('/filter')) {
     if (typeof body.freeOnly === 'boolean') host.freeOnly = body.freeOnly
     if (body.models && typeof body.models === 'object') {
@@ -413,6 +422,60 @@ console.log('free-only switch regression\n')
       const ops = formMutations[0];
       assert.ok(ops.some((o) => o.path[0] === 'freeOnly' && o.value === true), 'freeOnly op missing');
       assert.ok(ops.some((o) => o.path[0] === 'models' && o.path[1] === 'paid-model-01'), 'models op missing');
+    });
+  }
+  runtime.dispose()
+}
+
+// --- S5: the "更新模型" button forces a refresh and reports the diff ------
+{
+  const { runtime, props } = mount({ servedFreeOnly: false, hostFreeOnly: false })
+  await runtime.settle(props)
+  const tree = runtime.render(props)
+  const button = walk(tree).find((n) => n.type === 'button' && n.props.title === 'updateModelsHint');
+  check('S5a 卡片上有「更新模型」按钮', () => assert.ok(button, 'update-models button not found'));
+  if (button) {
+    await button.props.onClick();
+    await runtime.settle(props);
+    const refreshCalls = calls.filter((c) => c.url.endsWith('/refresh'));
+    check('S5b 点击后调用 /refresh 桥接路由', () => {
+      assert.equal(refreshCalls.length, 1, `expected 1 /refresh call, saw ${refreshCalls.length}`);
+    });
+    check('S5c 更新不改动任何仍在目录里的模型', () => {
+      const filterCalls = calls.filter((c) => c.url.endsWith('/filter'));
+      assert.equal(filterCalls.length, 0, 'updating must not write through the filter route');
+      // The draft holds only live ids in this scenario, so nothing is pruned.
+      const pruned = formMutations.filter((ops) => ops.some((o) => o.op === 'unset'));
+      assert.equal(pruned.length, 0, `unexpected prune: ${JSON.stringify(pruned)}`);
+      const sets = formMutations.flat().filter((o) => o.op === 'set' && o.path[0] === 'models');
+      assert.equal(sets.length, 0, 'updating must not rewrite live model entries');
+    });
+  }
+  runtime.dispose()
+}
+
+// --- S6: 更新模型 prunes the settings of models that left the catalog -------
+{
+  const { runtime, props } = mount({ servedFreeOnly: false, hostFreeOnly: false })
+  // a model that is in the settings map but NOT in the live roster
+  const tree = runtime.render(props)
+  void tree
+  // make the draft carry a stale id by writing a model entry that the
+  // roster does not carry
+  const stale = 'gone-model-free'
+  await runtime.settle(props)
+  // simulate: the settings map has an entry for a model the catalog dropped
+  props.form.state.value.models = { [stale]: { hidden: false, contextWindow: 0, maxOutput: 0 } }
+  const after = runtime.render(props)
+  const button = walk(after).find((n) => n.type === 'button' && n.props.title === 'updateModelsHint');
+  check('S6a 更新模型按钮存在', () => assert.ok(button, 'update-models button not found'));
+  if (button) {
+    await button.props.onClick();
+    await runtime.settle(props);
+    const pruned = formMutations.flat().filter((o) => o.op === 'unset');
+    check('S6b 过期的模型设置被 unset 掉', () => {
+      assert.equal(pruned.length, 1, `expected 1 unset op, saw ${JSON.stringify(formMutations)}`);
+      assert.deepEqual(pruned[0].path, ['models', stale]);
     });
   }
   runtime.dispose()

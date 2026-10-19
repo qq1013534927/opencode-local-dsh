@@ -107,8 +107,10 @@ async function readJsonBody(req) {
 /**
  * Build the loopback-guarded routes.
  *
- * handlers.status()  -> the live roster + token/catalog state
- * handlers.probe()   -> availability test for one model or all
+ * handlers.status()   -> the live roster + token/catalog state
+ * handlers.probe()    -> availability test for one model or all
+ * handlers.refresh()  -> re-fetch the model directory from upstream, now
+ * handlers.filter()   -> apply filter/visibility changes to the adapter
  */
 export function makeSettingsRoutes(handlers, deps = {}) {
   const guard = deps.guard ?? isTrustedBridgeRequest
@@ -183,6 +185,25 @@ export function makeSettingsRoutes(handlers, deps = {}) {
         } finally {
           res.end()
         }
+      },
+    },
+    {
+      /**
+       * Re-fetch the model directory from upstream, now.
+       *
+       * The catalog also refreshes on a timer, but the user who just noticed
+       * a missing model should not have to wait for it. This forces a round
+       * and returns WHAT changed (added / removed / limits changed), so the
+       * card can report it instead of silently re-rendering.
+       *
+       * Body: {} (a body is not required, but one is accepted).
+       */
+      kind: 'exact',
+      path: `${SETTINGS_BRIDGE_PREFIX}/refresh`,
+      handler: async (req, res) => {
+        if (!check(req, res)) return
+        const result = await handlers.refresh()
+        writeJson(res, 200, result)
       },
     },
     {

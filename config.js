@@ -35,11 +35,11 @@ export const Config = Schema.object({
   /**
    * One-click "free only" filter for the picker/roster.
    *
-   * false (the default for a paid account) exposes EVERY model the account can
-   * use; true narrows the list to the built-in free models. The card exposes
-   * this as a single toggle and applies it live.
+   * Defaults to TRUE so a fresh install lists just the built-in free models.
+   * Untick it to expose EVERY model the account can route (paid users) — the
+   * whole 48-model lane. The card applies the flip live.
    */
-  freeOnly: Schema.boolean().default(false).volatile(),
+  freeOnly: Schema.boolean().default(true).volatile(),
   /**
    * Per-model settings: visibility toggle and context/output overrides.
    * Keyed by model id; an absent entry means "metadata defaults, visible".
@@ -82,7 +82,8 @@ function deref(field, fallback) {
 export function settingsValue(config = {}) {
   const models = deref(config.models, undefined)
   return {
-    freeOnly: deref(config.freeOnly, false),    refreshSeconds: deref(config.refreshSeconds, 300),
+    freeOnly: deref(config.freeOnly, true),
+    refreshSeconds: deref(config.refreshSeconds, 300),
     accessToken: deref(config.accessToken, ''),
     models: models && typeof models === 'object' ? models : {},
   }

@@ -38,9 +38,9 @@ export class ModelCatalog {
 
   constructor(options = {}) {
     this.#refreshSeconds = options.refreshSeconds ?? 300
-    // Default: expose the WHOLE account catalog (paid users included); the
-    // card's one-click filter turns this to true.
-    this.#freeOnly = options.freeOnly === true
+    // Default: only the built-in free models (a fresh install starts here).
+    // The card's checkbox untucks this to expose the whole account catalog.
+    this.#freeOnly = options.freeOnly !== false
     this.#fetchImpl = options.fetchImpl ?? fetch
     this.#onRefresh = options.onRefresh
     this.#overrides = options.overrides ?? {}

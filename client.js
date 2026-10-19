@@ -53,9 +53,10 @@ window.__ModuleLoader__.load({
       saved: 'Saved.',
       unspecified: 'Not set',
       freeOnly: 'Free only',
-      freeOnlyHint: 'Show only the built-in free models. Off = every model your account can use (including paid).',
+      freeOnlyHint: 'Show only the built-in free models. Untick to see every model your account can route (including paid).',
       freeOnlyOn: 'Free-only filter on.',
       freeOnlyOff: 'Showing all models.',
+      free: 'free',
       paid: 'paid',
     }
 
@@ -83,9 +84,10 @@ window.__ModuleLoader__.load({
       saved: '已保存。',
       unspecified: '未设置',
       freeOnly: '只看免费',
-      freeOnlyHint: '只显示内置免费模型。关闭 = 显示你账号可用的全部模型（含付费）。',
+      freeOnlyHint: '只显示内置免费模型。取消勾选即可看到你账号可路由的全部模型（含付费）。',
       freeOnlyOn: '已开启只看免费。',
       freeOnlyOff: '已显示全部模型。',
+      free: '免费',
       paid: '付费',
     }
 
@@ -306,6 +308,11 @@ window.__ModuleLoader__.load({
         ? `${t('tokenSource')}: ${status.tokenSource}${status.account ? ` · ${t('account')}: ${status.account}` : ''} · ${t('catalog')}: ${status.catalog?.exposed ?? 0}/${status.catalog?.total ?? 0}`
         : statusError || '—'
 
+      /** "free N · paid M" — makes the current filter's scope explicit. */
+      const countsLine = status?.counts
+        ? `${t('free')} ${status.counts.free} · ${t('paid')} ${status.counts.paid}`
+        : ''
+
       /** One-click free-only filter: writes `freeOnly` and re-reads the roster. */
       const setFreeOnlyFilter = (next) => {
         if (typeof form.mutate === 'function') {
@@ -334,7 +341,7 @@ window.__ModuleLoader__.load({
             },
             busy ? t('testing') : t('testAll'),
           ),
-          // One-click free-only filter (the whole account catalog by default).
+          // One-click free-only filter (checked on a fresh install).
           h(
             'label',
             { style: { ...S.row, gap: 6, cursor: 'pointer' }, title: t('freeOnlyHint') },
@@ -344,6 +351,7 @@ window.__ModuleLoader__.load({
               onChange: (e) => setFreeOnlyFilter(e.target.checked),
             }),
             h('span', { style: S.muted }, t('freeOnly')),
+            countsLine ? h('span', { style: S.muted }, `(${countsLine})`) : null,
           ),
           note ? h('span', { style: S.muted }, note) : null,
         ),

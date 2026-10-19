@@ -69,7 +69,7 @@ Click the plugin's name under **Settings → Plugins** to open its card
 
 | Control | What it does |
 | --- | --- |
-| **Free only** toggle | One click narrows the picker to the built-in free models; off shows **every model your account can use** (paid included) — the default |
+| **Free only** toggle | **Checked on a fresh install** — the picker starts with the 11 built-in free models. Untick it to see **every model your account can route** (paid included) |
 | Per-model **show/hide** | Hide a model from the DSH model picker (`models.<id>.hidden`) |
 | Per-model **context / max output** | Shows the effective limit; typing a value overrides it, clearing it returns to auto (`models.<id>.contextWindow`, `maxOutput`) |
 | **Test** (per row) | Send a tiny streaming request to that model and report `OK` / `RATE_LIMIT` / `MODEL_UNAVAILABLE` / `REGION_BLOCKED` / `QUOTA_EXCEEDED` with latency |

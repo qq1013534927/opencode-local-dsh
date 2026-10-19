@@ -260,9 +260,39 @@ The card also carries a standing warning that the test sends real requests.
 If you hit the block, turning off the proxy/VPN is the fix; the plugin cannot
 unblock an address from the client side.
 
+### How long the block lasts
+
+**The upstream does not publish a duration, and the block is not on a timer
+that anyone outside OpenCode can read.** Measured and gathered:
+
+| Source | What it says |
+| --- | --- |
+| The upstream's own bot (on 9 GitHub issues, 2026-10-18/19) | "Only the team can review or lift that flag." Every issue was **auto-closed after 24h by the bot** — not fixed. There is no published expiry. |
+| A user's home network, blocked 2026-10-18 15:13 UTC | The same account and app **worked normally through a mobile hotspot** — so the block is scoped to the **exit address**, not the account. |
+| The upstream's own message | "If you're on a VPN or proxy, turn it off and try again" — advice aimed squarely at the exit address being the problem. |
+| OpenCode's docs (`/docs/console/models`) | No block policy, no duration, no appeal form. The only published contact is **help@anoma.ly**. |
+
+So the honest answer is: **the block lasts until the address stops being
+flagged, and only OpenCode can clear it.** What is known:
+
+- it follows the **exit address** (a different one works — that is the
+  reliable workaround);
+- it is **not** a rate limit: the *other* free-lane error,
+  `429 FreeUsageLimitError`, does publish a window
+  (`Retry-After: 34705` ≈ **9.6 hours**, and it resets on a bucket
+  boundary), while the IP block publishes nothing;
+- a residential / CGNAT address can be flagged **by other people's traffic**
+  — the upstream says so, and it is the likeliest cause on a mobile ISP.
+
+Practical order of things to try: turn off the VPN/proxy, or switch to a
+different network (a phone hotspot is the case users report working), then
+email **help@anoma.ly** with the exact error and the time it started if it
+persists.
+
 ## Error codes
 
-- `429 FreeUsageLimitError`: per-account free-tier throttling; DSH retries
+- `429 FreeUsageLimitError`: per-account free-tier throttling. The upstream
+  publishes a `Retry-After` for it (measured: 34705 s ≈ 9.6 h); DSH retries
   automatically — switch models if it persists (quotas are per-model).
 - `403 RegionError`: the model is not offered in your region; switch models.
 - `403 FreeTierError` (IP-level): the upstream blocked this address's free

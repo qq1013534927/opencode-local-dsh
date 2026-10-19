@@ -49,11 +49,20 @@ export const OWN_LANE_RETRY_POLICY = Object.freeze({
 /**
  * How long the availability test stays refused after an IP-level block.
  *
- * The upstream does not publish a retry time, and the block is the answer to
- * repeated requests from one address — so the window has to be long enough
- * that a user who clicks "test all" five times in a row is NOT the reason the
- * block persists. 30 minutes is a compromise: long enough to cool the
- * address down, short enough that the card is useful again the same evening.
+ * The upstream does not publish a retry time for this block — it is not a
+ * rate limit, so there is no `Retry-After` to honour. (The OTHER free-lane
+ * error, `429 FreeUsageLimitError`, does publish one: measured at 34705 s,
+ * about 9.6 hours, resetting on a bucket boundary.) Every GitHub report of
+ * the IP block was auto-closed after 24h by the upstream's bot without a
+ * fix, and one user's report says the same account worked normally through
+ * a mobile hotspot — so the block is scoped to the EXIT ADDRESS and only
+ * OpenCode can clear it.
+ *
+ * Because the length is unknown, this cooldown is NOT a claim about how long
+ * the upstream keeps the block. It is only a guard against the plugin making
+ * it worse: 30 minutes is long enough that a user who clicks "test all" five
+ * times in a row is not the reason the block persists, and short enough that
+ * the card is useful again the same evening.
  */
 export const IP_BLOCK_COOLDOWN_MS = 30 * 60_000
 

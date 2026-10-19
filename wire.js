@@ -84,8 +84,25 @@ export class HttpError extends Error {
 
 export function classifyError(text) {
   if (/\bRegionError\b|not available in your country/i.test(text)) return 'REGION_BLOCKED'
+  // Throttling first: the lane wraps rate limits as
+  // "Upstream request failed: Endpoint is unavailable." which must NOT read as
+  // a dead model.
+  if (/\bFreeUsageLimitError\b|\b429\b|rate.?limit|too many requests/i.test(text)) return 'RATE_LIMIT'
+  // The lane cannot serve this model at all (delisted, protocol-unsupported,
+  // region-less, or unknown). Distinct from throttling so the card can say
+  // "unavailable" instead of "rate limited".
+  if (
+    /\bModelProtocolUnsupported\b|ModelDeprecated|ModelNotFound/i.test(text) ||
+    // "Model X is unavailable" / "not supported" / "has been retired" — the
+    // model name sits between the quotes or bare, so match loosely but only
+    // within a line that also names a model.
+    /model\b.*\b(?:is unavailable|not supported|does not exist|has been retired|unknown model)\b/i.test(text) ||
+    /\bno such model\b/i.test(text)
+  ) {
+    return 'MODEL_UNAVAILABLE'
+  }
+  if (/\bNotFoundError\b|\b404\b/.test(text)) return 'MODEL_UNAVAILABLE'
   if (/\bFreeTierError\b|free tier can only be used from within OpenCode/i.test(text)) return 'FREE_TIER_RESTRICTED'
-  if (/\bFreeUsageLimitError\b|rate.?limit/i.test(text)) return 'RATE_LIMIT'
   if (/\b(?:401|403)\b/.test(text)) return 'AUTH'
   if (/insufficient|quota|billing|funds/i.test(text)) return 'QUOTA_EXCEEDED'
   if (/\b413\b|payload too large/i.test(text)) return 'INVALID_REQUEST'

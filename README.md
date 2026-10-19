@@ -45,15 +45,20 @@ Click the plugin's name under **Settings → Plugins** to open its card
 | Control | What it does |
 | --- | --- |
 | Per-model **show/hide** | Hide a model from the DSH model picker (`models.<id>.hidden`) |
-| Per-model **context / max output** | Override the discovered values; empty = auto (`models.<id>.contextWindow`, `maxOutput`) |
-| **Test** (per row) | Send a tiny streaming request to that model and report Available / Unavailable with latency |
-| **Test all** | Run the availability test across every listed model |
+| Per-model **context / max output** | Shows the effective limit; typing a value overrides it, clearing it returns to auto (`models.<id>.contextWindow`, `maxOutput`) |
+| **Test** (per row) | Send a tiny streaming request to that model and report `OK` / `RATE_LIMIT` / `MODEL_UNAVAILABLE` / `REGION_BLOCKED` with latency |
+| **Test all** | Probe every listed model; results stream in **one row at a time** (SSE) |
 | **Refresh** / **Save** | Re-read the live lane status / commit the edited model map |
 | Lane status line | Credential source, account, and catalog counts |
 
+Limits come from the **running OpenCode client's own `/api/model`** (the
+authoritative source); the public `models.opencode.ai` feed only fills gaps.
+Context/output values on the card are therefore the real per-model limits, not
+a blanket default.
+
 Live state (roster, availability) rides a loopback-only bridge
-(`/api/opencode-local/settings/status`, `/probe`); settings writes go through the
-official `configForms` transport.
+(`/api/opencode-local/settings/status`, `/probe` — the latter is an SSE stream);
+settings writes go through the official `configForms` transport.
 
 ## Prerequisites
 

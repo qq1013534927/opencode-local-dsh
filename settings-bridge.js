@@ -149,8 +149,40 @@ export function makeSettingsRoutes(handlers, deps = {}) {
           writeJson(res, 400, { ok: false, code: 'bad-request', message: 'unreadable JSON body' })
           return
         }
-        const result = await handlers.probe(body)
-        writeJson(res, 200, result)
+        // Server-sent events: each model's result is pushed the moment it
+        // settles, so the card fills row by row instead of waiting for the
+        // whole batch. `event: result` carries one probe result; the terminal
+        // `event: done` closes the stream.
+        res.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-store',
+          connection: 'keep-alive',
+          'referrer-policy': 'no-referrer',
+          'x-accel-buffering': 'no',
+        })
+        const send = (event, payload) => {
+          try {
+            res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`)
+          } catch {
+            /* client went away */
+          }
+        }
+        let closed = false
+        req.on?.('close', () => {
+          closed = true
+        })
+        try {
+          const ids = Array.isArray(body.ids) ? body.ids.filter((id) => typeof id === 'string' && id.length > 0) : []
+          send('start', { ids })
+          await handlers.probe(body, (result) => {
+            if (!closed) send('result', result)
+          })
+          send('done', { ok: true })
+        } catch (err) {
+          send('failed', { ok: false, message: String(err?.message ?? err) })
+        } finally {
+          res.end()
+        }
       },
     },
   ]

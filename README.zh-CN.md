@@ -42,14 +42,18 @@ Bun 不可用时自动回退 Node 直连（冷门 free 模型仍可用）。
 | 控件 | 作用 |
 | --- | --- |
 | 每个模型 **显示/隐藏** | 从 DSH 模型选择器里隐藏该模型（`models.<id>.hidden`） |
-| 每个模型 **上下文 / 最大输出** | 覆盖自动探测值；留空 = 自动（`models.<id>.contextWindow`、`maxOutput`） |
-| **测试**（每行） | 对该模型发一个极小的流式请求，返回「可用 / 不可用」与延迟 |
-| **全部测试** | 对所有列出的模型批量测可用性 |
+| 每个模型 **上下文 / 最大输出** | 显示**生效值**；填入数值即覆盖，清空恢复自动（`models.<id>.contextWindow`、`maxOutput`） |
+| **测试**（每行） | 对该模型发一个极小的流式请求，返回 `OK` / `RATE_LIMIT` / `MODEL_UNAVAILABLE` / `REGION_BLOCKED` 与延迟 |
+| **全部测试** | 对所有列出的模型批量测可用性；结果**逐个到达、逐行显示**（SSE） |
 | **刷新** / **保存** | 重读实时通道状态 / 提交编辑后的模型表 |
 | 状态行 | 凭据来源、账号、目录统计 |
 
+上下文长度取自**正在运行的 OpenCode 客户端自身的 `/api/model`**（权威来源）；
+公开的 `models.opencode.ai` 只用来补缺。因此卡片上的上下文/输出是真实的每模型限制，
+而不是统一的默认值。
+
 实时状态（模型名册、可用性）走 **仅本机回环** 的桥接
-（`/api/opencode-local/settings/status`、`/probe`）；设置写入走官方 `configForms` 通道。
+（`/api/opencode-local/settings/status`、`/probe`，后者是 SSE 流）；设置写入走官方 `configForms` 通道。
 
 ## 前提
 

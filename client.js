@@ -153,6 +153,7 @@ window.__ModuleLoader__.load({
       const [statusError, setStatusError] = React.useState('')
       const [roster, setRoster] = React.useState([])
       const [results, setResults] = React.useState({})
+      const [probing, setProbing] = React.useState({})
       const [busy, setBusy] = React.useState(false)
       const [note, setNote] = React.useState('')
       // Local draft of the per-model map; committed through mutate on change.
@@ -195,24 +196,90 @@ window.__ModuleLoader__.load({
         [draft, form, revision],
       )
 
+      /** The rows the card shows: live roster merged with the edited draft. */
+      const ordered = React.useMemo(() => {
+        const byId = new Map(roster.map((m) => [m.id, m]))
+        const merged = []
+        for (const m of roster) merged.push(m)
+        for (const id of Object.keys(draft)) {
+          if (!byId.has(id)) {
+            merged.push({
+              id,
+              hidden: draft[id]?.hidden === true,
+              free: id.includes('free'),
+              contextWindow: 0,
+              maxOutput: 0,
+            })
+          }
+        }
+        return merged.sort((a, b) => a.id.localeCompare(b.id))
+      }, [roster, draft])
+
+      /**
+       * Availability test over SSE: the bridge pushes one `result` event per
+       * model as soon as it settles, so rows fill in one by one instead of the
+       * whole batch landing at the end.
+       */
       const runProbe = React.useCallback(
         async (ids) => {
+          const targets = Array.isArray(ids) && ids.length > 0 ? ids : ordered.map((m) => m.id)
           setBusy(true)
           setNote(t('testing'))
+          setProbing(Object.fromEntries(targets.map((id) => [id, true])))
           try {
-            const payload = await bridge('/probe', { ids: ids ?? [] })
-            const list = payload?.value?.results ?? []
-            const next = { ...results }
-            for (const r of list) next[r.id] = r
-            setResults(next)
-            setNote('')
+            const res = await fetch(BRIDGE + '/probe', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ ids: targets }),
+            })
+            if (!res.ok || !res.body) throw new Error(`bridge /probe -> HTTP ${res.status}`)
+            const reader = res.body.getReader()
+            const decoder = new TextDecoder()
+            let buffer = ''
+            let event = ''
+            for (;;) {
+              const { done, value } = await reader.read()
+              if (done) break
+              buffer += decoder.decode(value, { stream: true })
+              let nl
+              while ((nl = buffer.indexOf('\n')) >= 0) {
+                const line = buffer.slice(0, nl).replace(/\r$/, '')
+                buffer = buffer.slice(nl + 1)
+                if (line.startsWith('event: ')) {
+                  event = line.slice(7).trim()
+                  continue
+                }
+                if (line.startsWith('data: ')) {
+                  let payload
+                  try {
+                    payload = JSON.parse(line.slice(6))
+                  } catch {
+                    continue
+                  }
+                  if (event === 'result' && payload?.id) {
+                    const result = payload
+                    setResults((prev) => ({ ...prev, [result.id]: result }))
+                    setProbing((prev) => {
+                      const next = { ...prev }
+                      delete next[result.id]
+                      return next
+                    })
+                  } else if (event === 'done') {
+                    setNote('')
+                  } else if (event === 'failed') {
+                    setNote(String(payload?.message ?? 'probe failed'))
+                  }
+                }
+              }
+            }
           } catch (err) {
             setNote(String(err?.message ?? err))
           } finally {
             setBusy(false)
+            setProbing({})
           }
         },
-        [results, t],
+        [t, ordered],
       )
 
       const commit = React.useCallback(() => {
@@ -222,16 +289,6 @@ window.__ModuleLoader__.load({
         }
         setNote(t('saved'))
       }, [draft, form, revision, t])
-
-      const ordered = React.useMemo(() => {
-        const byId = new Map(roster.map((m) => [m.id, m]))
-        const merged = []
-        for (const m of roster) merged.push(m)
-        for (const id of Object.keys(draft)) {
-          if (!byId.has(id)) merged.push({ id, hidden: draft[id]?.hidden === true, free: id.includes('free'), contextWindow: 0, maxOutput: 0 })
-        }
-        return merged.sort((a, b) => a.id.localeCompare(b.id))
-      }, [roster, draft])
 
       const statusLine = status
         ? `${t('tokenSource')}: ${status.tokenSource}${status.account ? ` · ${t('account')}: ${status.account}` : ''} · ${t('catalog')}: ${status.catalog?.exposed ?? 0}/${status.catalog?.total ?? 0}`
@@ -286,34 +343,44 @@ window.__ModuleLoader__.load({
                     checked: !hidden,
                     onChange: (e) => patchModel(m.id, { hidden: !e.target.checked }),
                   }),
+                  // Context / output: the input shows the EFFECTIVE value
+                  // (override when set, otherwise the discovered metadata), so
+                  // the number on screen is what the model actually gets.
                   h('input', {
                     style: S.input,
                     type: 'number',
                     min: 0,
-                    placeholder: String(m.contextWindow || t('auto')),
-                    value: entry.contextWindow || '',
+                    title: m.contextWindow ? `effective: ${m.contextWindow}` : t('auto'),
+                    value: entry.contextWindow ? entry.contextWindow : m.contextWindow || '',
+                    placeholder: t('auto'),
                     onChange: (e) => patchModel(m.id, { contextWindow: Number(e.target.value) || 0 }),
                   }),
                   h('input', {
                     style: S.input,
                     type: 'number',
                     min: 0,
-                    placeholder: String(m.maxOutput || t('auto')),
-                    value: entry.maxOutput || '',
+                    title: m.maxOutput ? `effective: ${m.maxOutput}` : t('auto'),
+                    value: entry.maxOutput ? entry.maxOutput : m.maxOutput || '',
+                    placeholder: t('auto'),
                     onChange: (e) => patchModel(m.id, { maxOutput: Number(e.target.value) || 0 }),
                   }),
                   h(
                     'div',
                     { style: { display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'flex-end' } },
-                    result
-                      ? h(
-                          'span',
-                          result.ok ? S.badgeOk : S.badgeBad,
-                          `${result.ok ? t('ok') : t('failed')}${result.message ? ` · ${result.code}` : ''}`,
-                        )
-                      : null,
-                    result && result.latencyMs ? h('span', { style: S.muted }, `${result.latencyMs}ms`) : null,
-                    h('button', { style: S.button, disabled: busy, onClick: () => void runProbe([m.id]) }, t('test')),
+                    probing[m.id]
+                      ? h('span', S.badgeWait, t('testing'))
+                      : result
+                        ? h(
+                            'span',
+                            { style: result.ok ? S.badgeOk : S.badgeBad, title: result.message || result.code },
+                            `${result.ok ? t('ok') : t('failed')} · ${result.code}${result.latencyMs ? ` · ${result.latencyMs}ms` : ''}`,
+                          )
+                        : null,
+                    h(
+                      'button',
+                      { style: S.button, disabled: Boolean(probing[m.id]), onClick: () => void runProbe([m.id]) },
+                      t('test'),
+                    ),
                   ),
                 )
               }),

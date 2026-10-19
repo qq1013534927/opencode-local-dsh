@@ -16,6 +16,8 @@ export const DEFAULT_MAX_TOKENS = 32768
 export class ModelCatalog {
   #models = new Map()
   #metaCache = new Map()
+  /** Limits read from the live OpenCode runtime (`/api/model`) — authoritative. */
+  #runtimeLimits = new Map()
   #lastRefresh = 0
   #lastError = ''
   #failed = false
@@ -27,6 +29,8 @@ export class ModelCatalog {
   #onRefresh
   #refreshing = null
   #tokenProvider = () => ''
+  /** Runtime-limit source (running OpenCode server), set by the adapter. */
+  #runtimeSource = null
   /** Per-model settings overrides: { [modelId]: { hidden?: boolean, contextWindow?: number, maxOutput?: number, enabled?: boolean } } */
   #overrides = {}
 
@@ -40,6 +44,23 @@ export class ModelCatalog {
 
   setTokenProvider(fn) {
     this.#tokenProvider = fn
+  }
+
+  /**
+   * Point the catalog at the running OpenCode server, which owns the
+   * authoritative per-model limits. Called by the adapter once it resolves the
+   * local service (or re-pointed when that resolution changes).
+   */
+  setRuntimeSource(source) {
+    this.#runtimeSource = source && typeof source === 'object' ? source : null
+  }
+
+  /** Fold cached metadata into every known model (runtime limits win). */
+  #applyMeta() {
+    for (const [id, meta] of this.#metaCache) {
+      const existing = this.#models.get(id)
+      if (existing) this.#models.set(id, { ...existing, ...pickPresent(meta) })
+    }
   }
 
   /**
@@ -76,6 +97,10 @@ export class ModelCatalog {
 
   async #refreshRound() {
     await Promise.allSettled([this.refreshModels(), this.refreshMetadata()])
+    // Runtime limits are authoritative and only available when a local server
+    // answers, so they run after the base roster is known and then win over
+    // the public feed inside #metaCache.
+    await this.refreshRuntimeLimits(this.#runtimeSource).catch(() => {})
     if (this.#onRefresh) {
       try {
         this.#onRefresh(this.snapshot(), this.#lastError)
@@ -103,6 +128,66 @@ export class ModelCatalog {
     }
   }
 
+  /**
+   * Enrichment pass 1: the live OpenCode runtime's own model directory.
+   *
+   * `GET <opencode-server>/api/model` returns the AUTHORITATIVE per-model
+   * `limit: { context, output }` (plus capabilities and reasoning variants) for
+   * exactly the models this client exposes. It needs the local server's Basic
+   * auth, so the plugin only uses it when the credential came from a running
+   * client and the server answers.
+   */
+  async refreshRuntimeLimits(deps) {
+    if (!deps?.serverUrl || !deps?.serverPassword) return
+    let payload
+    try {
+      const headers = {
+        accept: 'application/json',
+        authorization: 'Basic ' + Buffer.from(`opencode:${deps.serverPassword}`).toString('base64'),
+      }
+      const res = await this.#fetchImpl(deps.serverUrl.replace(/\/+$/, '') + '/api/model?directory=' + encodeURIComponent(process.cwd()), {
+        headers,
+        signal: AbortSignal.timeout(15_000),
+      })
+      if (!res.ok) throw new Error(`local /api/model returned HTTP ${res.status}`)
+      payload = await res.json()
+    } catch (err) {
+      if (!this.#lastError) this.#lastError = `runtime limits: ${err instanceof Error ? err.message : String(err)}`
+      return
+    }
+    const rows = Array.isArray(payload) ? payload : Array.isArray(payload?.data) ? payload.data : []
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') continue
+      if (row.providerID !== 'opencode') continue
+      const id = typeof row.modelID === 'string' && row.modelID.length > 0 ? row.modelID : row.id
+      if (typeof id !== 'string' || id.length === 0) continue
+      const limit = row.limit ?? {}
+      const capabilities = row.capabilities ?? {}
+      const effortValues = []
+      for (const variant of Array.isArray(row.variants) ? row.variants : []) {
+        const effort = variant?.settings?.reasoningEffort
+        if (typeof effort === 'string' && !effortValues.includes(effort)) effortValues.push(effort)
+      }
+      const meta = {
+        contextWindow: num(limit.context),
+        maxOutput: num(limit.output),
+        reasoning: Array.isArray(row.variants) && row.variants.length > 0,
+        effortValues,
+        inputModalities: decodeModalities(capabilities.input),
+      }
+      this.#runtimeLimits.set(id, meta)
+      this.#metaCache.set(id, meta)
+    }
+    this.#applyMeta()
+  }
+
+  /**
+   * Enrichment pass 2: the public models.opencode.ai catalog.
+   *
+   * The document is keyed BY PROVIDER (`{ opencode: { models: {...} }, ... }`),
+   * so models live one level down. Runtime limits win over this feed when both
+   * speak for the same id.
+   */
   async refreshMetadata() {
     try {
       const res = await this.#fetchImpl('https://models.opencode.ai/api.json', {
@@ -111,25 +196,35 @@ export class ModelCatalog {
       })
       if (!res.ok) throw new Error(`models.opencode.ai returned HTTP ${res.status}`)
       const data = await res.json()
-      // the catalog is a top-level model map keyed by id
-      for (const [id, raw] of Object.entries(data ?? {})) {
-        if (!raw || typeof raw !== 'object') continue
-        const m = raw
-        const limit = m.limit ?? {}
-        const modalities = m.modalities ?? {}
-        this.#metaCache.set(id, {
-          contextWindow: num(limit.context),
-          maxOutput: num(limit.output),
-          reasoning: m.reasoning === true,
-          effortValues: decodeEffortValues(m.reasoning_options),
-          inputModalities: decodeModalities(modalities.input),
-        })
+      const providers = data && typeof data === 'object' ? data : {}
+      // Prefer the `opencode` provider; fall back to any key that looks like one.
+      const keys = Object.keys(providers).sort((a, b) => {
+        const rank = (k) => (k.toLowerCase() === 'opencode' ? 0 : /opencode/i.test(k) ? 1 : 2)
+        return rank(a) - rank(b) || a.localeCompare(b)
+      })
+      for (const key of keys) {
+        const provider = providers[key]
+        const models = provider && typeof provider === 'object' ? provider.models : undefined
+        if (!models || typeof models !== 'object') continue
+        for (const [modelKey, raw] of Object.entries(models)) {
+          if (!raw || typeof raw !== 'object') continue
+          const m = raw
+          const id = typeof m.id === 'string' && m.id.length > 0 ? m.id : modelKey
+          const prior = this.#metaCache.get(id) ?? {}
+          const limit = m.limit ?? {}
+          const modalities = m.modalities ?? {}
+          // runtime limits win; the feed fills the gaps
+          this.#metaCache.set(id, {
+            contextWindow: prior.contextWindow ?? num(limit.context),
+            maxOutput: prior.maxOutput ?? num(limit.output),
+            reasoning: prior.reasoning ?? m.reasoning === true,
+            effortValues: prior.effortValues?.length ? prior.effortValues : decodeEffortValues(m.reasoning_options),
+            inputModalities: prior.inputModalities ?? decodeModalities(modalities.input),
+          })
+        }
+        break // the first provider that speaks for the lane wins
       }
-      // re-apply enrichment to already-known models
-      for (const [id, meta] of this.#metaCache) {
-        const existing = this.#models.get(id)
-        if (existing) this.#models.set(id, { ...existing, ...pickPresent(meta) })
-      }
+      this.#applyMeta()
     } catch (err) {
       if (!this.#lastError) this.#lastError = `metadata: ${err instanceof Error ? err.message : String(err)}`
     }

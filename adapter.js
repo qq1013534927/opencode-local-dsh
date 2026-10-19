@@ -114,6 +114,12 @@ export class OpenCodeLocalAdapter {
 
   async #ensureToken() {
     const resolved = await this.#tokens.resolve()
+    // The runtime owns the authoritative per-model limits; keep the catalog
+    // pointed at whichever server we last resolved credentials from.
+    this.#catalog.setRuntimeSource({
+      serverUrl: resolved.serverUrl,
+      serverPassword: resolved.serverPassword,
+    })
     return resolved.accessToken
   }
 
@@ -147,8 +153,12 @@ export class OpenCodeLocalAdapter {
    * Availability test: send one tiny streaming request per model through the
    * same transport inference uses, and classify the outcome.
    *
+   * Models are probed SEQUENTIALLY and each result is handed to `onResult` as
+   * soon as it settles, so a caller can stream per-model progress instead of
+   * waiting for the whole batch.
+   *
    * @param ids model ids to probe (empty = every visible model)
-   * @param onResult optional per-model callback for streaming progress
+   * @param onResult per-model callback (result) => void
    */
   async probe(ids = [], onResult) {
     const targets = (Array.isArray(ids) && ids.length > 0 ? ids : this.#catalog.list().map((m) => m.id)).filter(
@@ -156,48 +166,7 @@ export class OpenCodeLocalAdapter {
     )
     const results = []
     for (const id of targets) {
-      const started = Date.now()
-      let ok = false
-      let code = 'UNKNOWN'
-      let message = ''
-      let text = ''
-      try {
-        const token = await this.#ensureToken()
-        const prepared = await this.prepareCall(PROVIDER_ID, id)
-        for await (const chunk of prepared.stream({
-          provider: PROVIDER_ID,
-          model: id,
-          system: 'Availability probe. Follow the instruction exactly.',
-          messages: [{ role: 'user', content: [{ type: 'text', text: 'Reply with exactly: OK' }] }],
-          maxTokens: 24,
-        })) {
-          if (chunk.type === 'text-delta') text += chunk.text
-          else if (chunk.type === 'finish') {
-            if (chunk.reason?.kind === 'stop') ok = true
-            else if (chunk.reason?.kind === 'error') {
-              code = chunk.reason.failure?.code ?? 'ERROR'
-              message = chunk.reason.failure?.message ?? ''
-            } else if (chunk.reason?.kind === 'tool-calls') ok = true
-            else if (chunk.reason?.kind === 'max-tokens') ok = true
-          }
-        }
-        if (ok) {
-          code = 'OK'
-          message = ''
-        }
-        void token
-      } catch (err) {
-        code = classifyError(String(err?.message ?? err))
-        message = String(err?.message ?? err)
-      }
-      const result = {
-        id,
-        ok,
-        code,
-        message: String(message).slice(0, 300),
-        sample: text.slice(0, 60),
-        latencyMs: Date.now() - started,
-      }
+      const result = await this.probeOne(id)
       results.push(result)
       if (typeof onResult === 'function') {
         try {
@@ -208,6 +177,55 @@ export class OpenCodeLocalAdapter {
       }
     }
     return results
+  }
+
+  /** Probe one model and classify the outcome. */
+  async probeOne(id) {
+    const started = Date.now()
+    let ok = false
+    let code = 'UNKNOWN'
+    let message = ''
+    let text = ''
+    try {
+      await this.#ensureToken()
+      const prepared = await this.prepareCall(PROVIDER_ID, id)
+      for await (const chunk of prepared.stream({
+        provider: PROVIDER_ID,
+        model: id,
+        system: 'Availability probe. Follow the instruction exactly.',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'Reply with exactly: OK' }] }],
+        maxTokens: 24,
+      })) {
+        if (chunk.type === 'text-delta') text += chunk.text
+        else if (chunk.type === 'finish') {
+          if (chunk.reason?.kind === 'stop') ok = true
+          else if (chunk.reason?.kind === 'tool-calls') ok = true
+          else if (chunk.reason?.kind === 'max-tokens') ok = true
+          else if (chunk.reason?.kind === 'error') {
+            code = chunk.reason.failure?.code ?? 'ERROR'
+            message = chunk.reason.failure?.message ?? ''
+          } else if (chunk.reason?.kind === 'aborted') {
+            code = 'ABORTED'
+            message = chunk.reason.failure?.message ?? ''
+          }
+        }
+      }
+      if (ok) {
+        code = 'OK'
+        message = ''
+      }
+    } catch (err) {
+      code = classifyError(String(err?.message ?? err))
+      message = String(err?.message ?? err)
+    }
+    return {
+      id,
+      ok,
+      code,
+      message: String(message).slice(0, 300),
+      sample: text.slice(0, 60),
+      latencyMs: Date.now() - started,
+    }
   }
 
   async listModels(provider) {

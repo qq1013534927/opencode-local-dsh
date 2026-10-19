@@ -116,9 +116,9 @@ export function apply(ctx, rawConfig = {}) {
           },
         }
       },
-      async probe(body) {
+      async probe(body, onResult) {
         const ids = Array.isArray(body.ids) ? body.ids.filter((id) => typeof id === 'string' && id.length > 0) : []
-        const results = await adapter.probe(ids)
+        const results = await adapter.probe(ids, onResult)
         return { ok: true, value: { results } }
       },
     },

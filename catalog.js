@@ -18,6 +18,8 @@ export class ModelCatalog {
   #metaCache = new Map()
   /** Limits read from the live OpenCode runtime (`/api/model`) — authoritative. */
   #runtimeLimits = new Map()
+  /** The runtime's full inventory (every provider), for reporting only. */
+  #runtimeInventory = new Map()
   #lastRefresh = 0
   #lastError = ''
   #failed = false
@@ -36,7 +38,9 @@ export class ModelCatalog {
 
   constructor(options = {}) {
     this.#refreshSeconds = options.refreshSeconds ?? 300
-    this.#freeOnly = options.freeOnly ?? true
+    // Default: expose the WHOLE account catalog (paid users included); the
+    // card's one-click filter turns this to true.
+    this.#freeOnly = options.freeOnly === true
     this.#fetchImpl = options.fetchImpl ?? fetch
     this.#onRefresh = options.onRefresh
     this.#overrides = options.overrides ?? {}
@@ -73,6 +77,16 @@ export class ModelCatalog {
 
   getOverrides() {
     return this.#overrides
+  }
+
+  /** Whether the catalog is currently narrowed to free models. */
+  freeOnlyEnabled() {
+    return this.#freeOnly
+  }
+
+  /** Flip the free-only filter (the card's one-click toggle). */
+  setFreeOnly(value) {
+    this.#freeOnly = value === true
   }
 
   /** The effective override for one model (empty object when none). */
@@ -158,9 +172,10 @@ export class ModelCatalog {
     const rows = Array.isArray(payload) ? payload : Array.isArray(payload?.data) ? payload.data : []
     for (const row of rows) {
       if (!row || typeof row !== 'object') continue
-      if (row.providerID !== 'opencode') continue
-      const id = typeof row.modelID === 'string' && row.modelID.length > 0 ? row.modelID : row.id
-      if (typeof id !== 'string' || id.length === 0) continue
+      const provider = typeof row.providerID === 'string' ? row.providerID : ''
+      if (!provider) continue
+      const modelId = typeof row.modelID === 'string' && row.modelID.length > 0 ? row.modelID : row.id
+      if (typeof modelId !== 'string' || modelId.length === 0) continue
       const limit = row.limit ?? {}
       const capabilities = row.capabilities ?? {}
       const effortValues = []
@@ -175,9 +190,33 @@ export class ModelCatalog {
         effortValues,
         inputModalities: decodeModalities(capabilities.input),
       }
-      this.#runtimeLimits.set(id, meta)
-      this.#metaCache.set(id, meta)
+      // Every provider is recorded so the card can report the account's real
+      // inventory, but only the `opencode` lane is EXPOSED: this plugin's
+      // transport posts to opencode.ai/zen, so another provider's model ids
+      // (e.g. `anthropic/claude-...`) are not routable here and are probed as
+      // MODEL_UNAVAILABLE.
+      this.#runtimeInventory.set(modelId, { provider, enabled: row.enabled !== false })
+      if (provider !== 'opencode') continue
+      if (row.enabled === false) continue
+      this.#runtimeLimits.set(modelId, meta)
+      this.#metaCache.set(modelId, meta)
+
+      const existing = this.#models.get(modelId)
+      if (existing) {
+        this.#models.set(modelId, { ...existing, ...pickPresent(meta) })
+      } else {
+        // An opencode-lane model the Zen free list did not carry (a paid id).
+        this.#models.set(modelId, {
+          id: modelId,
+          contextWindow: meta.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+          maxOutput: meta.maxOutput ?? DEFAULT_MAX_TOKENS,
+          reasoning: meta.reasoning === true,
+          effortValues: meta.effortValues ?? [],
+          inputModalities: meta.inputModalities ?? ['text'],
+        })
+      }
     }
+    // Zen `/v1/models` only ever lists the opencode lane, so nothing is pruned.
     this.#applyMeta()
   }
 
@@ -254,10 +293,17 @@ export class ModelCatalog {
     }
   }
 
+  /**
+   * The models DSH exposes to the picker.
+   *
+   * Default: EVERY model the account can use (so paid-account users get their
+   * full catalog). `freeOnly` narrows it to the `-free` subset — the card's
+   * one-click "free only" filter. `models.<id>.hidden` always wins.
+   */
   list() {
     const out = []
     for (const m of this.#models.values()) {
-      if (this.#freeOnly && !m.id.toLowerCase().includes('free')) continue
+      if (this.#freeOnly && !isFreeId(m.id)) continue
       if (this.#overrideFor(m.id).hidden === true) continue
       out.push(this.#applyOverride(m))
     }
@@ -267,9 +313,8 @@ export class ModelCatalog {
   get(id) {
     const m = this.#models.get(id)
     if (!m) return undefined
-    if (this.#freeOnly && !m.id.toLowerCase().includes('free')) return undefined
-    const override = this.#overrideFor(id)
-    if (override.hidden === true) return undefined
+    if (this.#freeOnly && !isFreeId(id)) return undefined
+    if (this.#overrideFor(id).hidden === true) return undefined
     return this.#applyOverride(m)
   }
 
@@ -282,20 +327,21 @@ export class ModelCatalog {
     return { ...m, contextWindow, maxOutput }
   }
 
-  /** Every model with its visibility/override state — the settings page roster. */
+  /**
+   * Every model with its visibility/override state — the settings page roster.
+   * With `freeOnly` off (the default for paid users) the whole account catalog
+   * is listed; the card's filter simply flips `freeOnly`.
+   */
   roster() {
     const out = []
     for (const m of this.#models.values()) {
       const override = this.#overrideFor(m.id)
-      if (this.#freeOnly && !m.id.toLowerCase().includes('free') && override.hidden !== false) {
-        // non-free models stay out of a free-only deployment unless explicitly shown
-        continue
-      }
+      if (this.#freeOnly && !isFreeId(m.id)) continue
       const effective = this.#applyOverride(m)
       out.push({
         id: m.id,
         hidden: override.hidden === true,
-        free: m.id.toLowerCase().includes('free'),
+        free: isFreeId(m.id),
         contextWindow: effective.contextWindow,
         maxOutput: effective.maxOutput,
         contextWindowOverridden: num(override.contextWindow) !== undefined,
@@ -304,6 +350,19 @@ export class ModelCatalog {
       })
     }
     return out.sort((a, b) => a.id.localeCompare(b.id))
+  }
+
+  /** Counts for the card's header (`free` vs `paid` visible now). */
+  counts() {
+    const all = [...this.#models.keys()]
+    let free = 0
+    for (const id of all) if (isFreeId(id)) free += 1
+    return { total: all.length, free, paid: all.length - free, exposed: this.list().length }
+  }
+
+  /** The runtime's whole inventory (all providers), for diagnostics. */
+  inventory() {
+    return { runtime: this.#runtimeInventory.size, lane: this.#models.size }
   }
 
   snapshot() {
@@ -332,6 +391,17 @@ function pickPresent(meta) {
 
 function num(v) {
   return typeof v === 'number' && Number.isFinite(v) ? v : undefined
+}
+
+/**
+ * Whether a model id is one of OpenCode's built-in free lane models.
+ *
+ * `-free` suffix ids are the lane's own free tier; `big-pickle` is a verified
+ * free anonymous-lane model that carries no such suffix.
+ */
+export function isFreeId(id) {
+  const value = String(id ?? '').toLowerCase()
+  return value.includes('free') || value === 'big-pickle'
 }
 
 function decodeEffortValues(raw) {

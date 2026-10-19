@@ -132,11 +132,12 @@ export function apply(ctx, rawConfig = {}) {
     const next = readSettings(rawConfig)
     settings = next
     adapter.setOverrides(toOverrides(next.models))
+    adapter.setFreeOnly(next.freeOnly === true)
     void adapter
       .warm()
       .then(() => {
         writeStatus()
-        logger.info('opencode-local: settings applied')
+        logger.info(`opencode-local: settings applied (freeOnly=${next.freeOnly === true})`)
       })
       .catch(() => {})
   }

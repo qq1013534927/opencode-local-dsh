@@ -134,6 +134,16 @@ export class OpenCodeLocalAdapter {
     this.#catalog.setOverrides(overrides)
   }
 
+  /**
+   * Flip the "free only" filter live.
+   *
+   * false exposes every model the account can use (paid users); true narrows
+   * the picker to the built-in free models.
+   */
+  setFreeOnly(freeOnly) {
+    this.#catalog.setFreeOnly(freeOnly)
+  }
+
   /** The live roster for the settings page (visibility/limits per model). */
   roster() {
     return this.#catalog.roster()
@@ -145,6 +155,8 @@ export class OpenCodeLocalAdapter {
     return {
       tokenSource: this.#tokens.current?.source ?? 'unresolved',
       account: this.#tokens.current?.account,
+      freeOnly: this.#catalog.freeOnlyEnabled(),
+      counts: this.#catalog.counts(),
       catalog: { total: catalog.total, exposed: catalog.exposed, status: catalog.status, lastError: catalog.lastError },
     }
   }

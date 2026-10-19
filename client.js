@@ -52,6 +52,11 @@ window.__ModuleLoader__.load({
       adopt: 'auto',
       saved: 'Saved.',
       unspecified: 'Not set',
+      freeOnly: 'Free only',
+      freeOnlyHint: 'Show only the built-in free models. Off = every model your account can use (including paid).',
+      freeOnlyOn: 'Free-only filter on.',
+      freeOnlyOff: 'Showing all models.',
+      paid: 'paid',
     }
 
     const zh = {
@@ -77,6 +82,11 @@ window.__ModuleLoader__.load({
       adopt: '自动',
       saved: '已保存。',
       unspecified: '未设置',
+      freeOnly: '只看免费',
+      freeOnlyHint: '只显示内置免费模型。关闭 = 显示你账号可用的全部模型（含付费）。',
+      freeOnlyOn: '已开启只看免费。',
+      freeOnlyOff: '已显示全部模型。',
+      paid: '付费',
     }
 
     // -- styles (theme tokens only) ----------------------------------------
@@ -124,6 +134,8 @@ window.__ModuleLoader__.load({
       badgeOk: { fontSize: 11, padding: '1px 6px', borderRadius: 999, background: 'rgba(46,160,67,0.18)', color: 'rgb(46,160,67)' },
       badgeBad: { fontSize: 11, padding: '1px 6px', borderRadius: 999, background: 'rgba(207,80,80,0.18)', color: 'rgb(207,80,80)' },
       badgeWait: { fontSize: 11, padding: '1px 6px', borderRadius: 999, opacity: 0.6 },
+      tagFree: { fontSize: 10, padding: '0 5px', borderRadius: 4, background: 'rgba(46,160,67,0.16)', color: 'rgb(46,160,67)', flexShrink: 0 },
+      tagPaid: { fontSize: 10, padding: '0 5px', borderRadius: 4, background: 'rgba(127,127,127,0.16)', opacity: 0.75, flexShrink: 0 },
     }
 
     /** Small same-origin POST to the loopback bridge. */
@@ -294,6 +306,16 @@ window.__ModuleLoader__.load({
         ? `${t('tokenSource')}: ${status.tokenSource}${status.account ? ` · ${t('account')}: ${status.account}` : ''} · ${t('catalog')}: ${status.catalog?.exposed ?? 0}/${status.catalog?.total ?? 0}`
         : statusError || '—'
 
+      /** One-click free-only filter: writes `freeOnly` and re-reads the roster. */
+      const setFreeOnlyFilter = (next) => {
+        if (typeof form.mutate === 'function') {
+          void form.mutate([{ op: 'set', path: ['freeOnly'], value: next }], revision)
+        }
+        setNote(next ? t('freeOnlyOn') : t('freeOnlyOff'))
+        // The Host applies the filter live; re-read so the rows follow.
+        window.setTimeout(() => void loadStatus(), 400)
+      }
+
       return h(
         'div',
         { style: S.card },
@@ -311,6 +333,17 @@ window.__ModuleLoader__.load({
               onClick: () => void runProbe(ordered.map((m) => m.id)),
             },
             busy ? t('testing') : t('testAll'),
+          ),
+          // One-click free-only filter (the whole account catalog by default).
+          h(
+            'label',
+            { style: { ...S.row, gap: 6, cursor: 'pointer' }, title: t('freeOnlyHint') },
+            h('input', {
+              type: 'checkbox',
+              checked: Boolean(status?.freeOnly),
+              onChange: (e) => setFreeOnlyFilter(e.target.checked),
+            }),
+            h('span', { style: S.muted }, t('freeOnly')),
           ),
           note ? h('span', { style: S.muted }, note) : null,
         ),
@@ -337,7 +370,14 @@ window.__ModuleLoader__.load({
                 return h(
                   'div',
                   { key: m.id, style: { ...S.line, opacity: hidden ? 0.55 : 1 } },
-                  h('span', { style: S.name, title: m.id }, m.id),
+                  h(
+                    'span',
+                    { style: { ...S.name, display: 'flex', alignItems: 'center', gap: 6 }, title: m.id },
+                    h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis' } }, m.id),
+                    m.free
+                      ? h('span', { style: S.tagFree }, 'free')
+                      : h('span', { style: S.tagPaid }, t('paid')),
+                  ),
                   h('input', {
                     type: 'checkbox',
                     checked: !hidden,

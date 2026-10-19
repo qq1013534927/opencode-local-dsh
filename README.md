@@ -24,6 +24,31 @@ OpenCodeLocalAdapter (native LlmAdapter, registered as `opencode-local`)
 https://opencode.ai/zen/v1  ← YOUR account token
 ```
 
+## Context overrides really work (measured)
+
+The card can raise a model's declared context window. That is not cosmetic —
+the upstream honours longer input than the model's own metadata advertises:
+
+Needle test on `deepseek-v4.1-flash-free` with the card declaring **1,048,576**
+(its metadata says 200,000). A unique code was buried two-thirds deep in filler
+text and asked back:
+
+| Sent | Upstream reported input | Code recovered |
+| --- | ---: | --- |
+| ~50k | 49,878 | ✅ |
+| ~150k | 149,598 | ✅ |
+| ~190k | 189,486 | ✅ |
+| **~210k** (past 200k) | 209,430 | ✅ |
+| **~250k** | 249,318 | ✅ |
+| ~300k | — | ❌ (request rejected) |
+
+So a 1M declaration is **usable to roughly 250k on this model** — input beyond
+the advertised 200k is genuinely processed, not silently truncated. The real
+ceiling is between 250k and 300k, not 1M, so a very large declared window trades
+a bigger prompt for a late request failure. Values in that gap are best treated
+as "the account's practical ceiling", which is why the card shows the effective
+value and lets you lower it.
+
 ## Why the Bun relay
 
 The opencode.ai gateway **rate-limits by TLS fingerprint**:
@@ -44,12 +69,21 @@ Click the plugin's name under **Settings → Plugins** to open its card
 
 | Control | What it does |
 | --- | --- |
+| **Free only** toggle | One click narrows the picker to the built-in free models; off shows **every model your account can use** (paid included) — the default |
 | Per-model **show/hide** | Hide a model from the DSH model picker (`models.<id>.hidden`) |
 | Per-model **context / max output** | Shows the effective limit; typing a value overrides it, clearing it returns to auto (`models.<id>.contextWindow`, `maxOutput`) |
-| **Test** (per row) | Send a tiny streaming request to that model and report `OK` / `RATE_LIMIT` / `MODEL_UNAVAILABLE` / `REGION_BLOCKED` with latency |
+| **Test** (per row) | Send a tiny streaming request to that model and report `OK` / `RATE_LIMIT` / `MODEL_UNAVAILABLE` / `REGION_BLOCKED` / `QUOTA_EXCEEDED` with latency |
 | **Test all** | Probe every listed model; results stream in **one row at a time** (SSE) |
 | **Refresh** / **Save** | Re-read the live lane status / commit the edited model map |
-| Lane status line | Credential source, account, and catalog counts |
+| Lane status line | Credential source, account, and catalog counts (free / paid) |
+
+### Model scope
+
+The card lists the models of the **`opencode` lane** the running client can
+route — its built-in free models *and* its paid models (for a subscribed
+account). Models belonging to other providers (OpenRouter, a custom endpoint)
+are counted for diagnostics but not exposed, because this plugin's transport
+posts to `opencode.ai/zen`, where those ids are not routable.
 
 Limits come from the **running OpenCode client's own `/api/model`** (the
 authoritative source); the public `models.opencode.ai` feed only fills gaps.

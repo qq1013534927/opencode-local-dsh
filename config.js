@@ -28,12 +28,18 @@ export const MODEL_OVERRIDE_DEFAULTS = {
 }
 
 export const Config = Schema.object({
-  /** Only expose the account's free models (opencode built-in `-free` ids). */
-  freeOnly: Schema.boolean().default(true).volatile(),
   /** Model catalog refresh interval in seconds. */
   refreshSeconds: Schema.number().step(1).min(30).default(300).volatile(),
   /** Explicit access token override (empty = resolve from the running OpenCode). */
   accessToken: Schema.string().default('').volatile(),
+  /**
+   * One-click "free only" filter for the picker/roster.
+   *
+   * false (the default for a paid account) exposes EVERY model the account can
+   * use; true narrows the list to the built-in free models. The card exposes
+   * this as a single toggle and applies it live.
+   */
+  freeOnly: Schema.boolean().default(false).volatile(),
   /**
    * Per-model settings: visibility toggle and context/output overrides.
    * Keyed by model id; an absent entry means "metadata defaults, visible".
@@ -76,8 +82,7 @@ function deref(field, fallback) {
 export function settingsValue(config = {}) {
   const models = deref(config.models, undefined)
   return {
-    freeOnly: deref(config.freeOnly, true),
-    refreshSeconds: deref(config.refreshSeconds, 300),
+    freeOnly: deref(config.freeOnly, false),    refreshSeconds: deref(config.refreshSeconds, 300),
     accessToken: deref(config.accessToken, ''),
     models: models && typeof models === 'object' ? models : {},
   }

@@ -250,6 +250,46 @@ const buildAdapter = () => {
   })
 }
 
+// --- 5. the block must survive a restart -------------------------------------
+{
+  check('5a adapter 可以恢复一个已记录的封禁', async () => {
+    const { adapter } = buildAdapter()
+    assert.equal(adapter.ipBlockState().blocked, false, 'a fresh adapter is not blocked')
+    // A deadline in the future restores.
+    const until = Date.now() + 10 * 60_000
+    assert.equal(adapter.restoreIpBlock(until), true)
+    assert.equal(adapter.ipBlockState().blocked, true, 'the restored block must hold')
+    // A deadline in the past is ignored.
+    const fresh = buildAdapter().adapter
+    assert.equal(fresh.restoreIpBlock(Date.now() - 1000), false, 'an expired deadline must not restore')
+    assert.equal(fresh.ipBlockState().blocked, false)
+    // Garbage is ignored.
+    assert.equal(fresh.restoreIpBlock('nonsense'), false)
+  })
+
+  check('5b 封禁会被写盘，重启后读回', () => {
+    const index = read('index.js')
+    assert.ok(/ip-block\.json/.test(index), 'the block must be recorded on disk')
+    assert.ok(/persistIpBlock/.test(index), 'there must be a persist function')
+    assert.ok(/restoreIpBlock/.test(index), 'and it must be restored on start')
+    // The record must be written when a block starts, not only on dispose.
+    const probeRoute = index.slice(index.indexOf('async probe(body, onResult)'))
+    const route = probeRoute.slice(0, probeRoute.indexOf('async refresh()'))
+    assert.ok(
+      /persistIpBlock\(\)/.test(route),
+      'the probe route must persist the block as soon as it starts',
+    )
+  })
+
+  check('5c 盘上的记录用私有权限写入', () => {
+    const index = read('index.js')
+    assert.ok(
+      /ipBlockPath,[\s\S]{0,400}?mode: 0o600/.test(index),
+      'the record file must be written with a private mode',
+    )
+  })
+}
+
 const failed = results.filter((r) => !r.ok)
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`)
 if (failed.length > 0) {

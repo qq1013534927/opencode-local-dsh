@@ -19,7 +19,7 @@
 
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { writeFile, mkdir } from 'node:fs/promises'
+import { writeFile, mkdir, readFile } from 'node:fs/promises'
 
 import { OpenCodeLocalAdapter, PROVIDER_ID } from './adapter.js'
 import { Config, readSettings, toOverrides } from './config.js'
@@ -40,6 +40,10 @@ export function apply(ctx, rawConfig = {}) {
 
   const dataDir = join(homedir(), '.opencode-local-dsh')
   const statusPath = join(dataDir, 'adapter-status.json')
+  // The IP-block deadline lives in its OWN file: it must survive a restart
+  // (see restoreIpBlock) and it must not be lost when the status file is
+  // rewritten by a later catalog refresh.
+  const ipBlockPath = join(dataDir, 'ip-block.json')
 
   let disposed = false
   const registration = { handle: null }
@@ -125,6 +129,59 @@ export function apply(ctx, rawConfig = {}) {
     })()
   }
 
+  /**
+   * Remember the IP-block deadline so a restart does not forget it.
+   *
+   * The upstream's block outlives the process, and the cooldown exists to
+   * stop the plugin from making it worse. A restart that forgot the block
+   * would hand the user a fresh "test all" button seconds after the traffic
+   * that caused the block — so the deadline is written to disk and restored
+   * on the next start.
+   */
+  const persistIpBlock = () => {
+    const state = adapter.ipBlockState()
+    if (!state.blocked) {
+      // The block has expired: drop the record so it cannot be restored
+      // later by mistake.
+      void (async () => {
+        try {
+          const { rm } = await import('node:fs/promises')
+          await rm(ipBlockPath, { force: true })
+        } catch {
+          /* best-effort */
+        }
+      })()
+      return
+    }
+    void (async () => {
+      try {
+        await mkdir(dataDir, { recursive: true })
+        await writeFile(
+          ipBlockPath,
+          JSON.stringify({ until: state.until, recordedAt: new Date().toISOString() }, null, 2),
+          { encoding: 'utf8', mode: 0o600 },
+        )
+      } catch {
+        /* best-effort */
+      }
+    })()
+  }
+
+  // Restore a block recorded before a restart, so the protection survives.
+  void (async () => {
+    try {
+      const text = await readFile(ipBlockPath, 'utf8')
+      const parsed = JSON.parse(text)
+      if (adapter.restoreIpBlock(parsed?.until)) {
+        logger.warn(
+          `opencode-local: the upstream's IP block is still in force (restored from disk); the availability test stays off for ${Math.ceil(adapter.ipBlockState().remainingMs / 60000)} more minutes`,
+        )
+      }
+    } catch {
+      /* no record, or unreadable: nothing to restore */
+    }
+  })()
+
   // Register FIRST so the provider appears in the model picker immediately;
   // the token resolves and the catalog warms in the background.
   registration.handle = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
@@ -184,6 +241,9 @@ export function apply(ctx, rawConfig = {}) {
         // The block state travels with the results: if the upstream refused
         // this IP, the card has to know even when the SSE stream was cut.
         const ipBlock = adapter.ipBlockState()
+        // A block that has just started must be remembered, so a restart does
+        // not hand the user a fresh "test all" button.
+        persistIpBlock()
         return {
           ok: true,
           value: {
@@ -289,6 +349,10 @@ export function apply(ctx, rawConfig = {}) {
     maybeEffect.call(ctx, () => () => {
       disposed = true
       clearInterval(refreshTimer)
+      // Remember the block before the adapter's state goes away: the
+      // upstream's block outlives the plugin fiber, and the next start must
+      // not hand the user a fresh "test all" button.
+      persistIpBlock()
       // Stop the catalog too: it must not start another refresh round after
       // the plugin is gone.
       adapter.stop()

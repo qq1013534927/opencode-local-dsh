@@ -324,6 +324,23 @@ export class OpenCodeLocalAdapter {
   }
 
   /**
+   * Restore a block that was recorded before a restart.
+   *
+   * The cooldown lives in memory, so without this a restart would forget the
+   * block and hand the user a fresh "test all" button — right after the very
+   * traffic that caused it. The host persists the deadline and passes it
+   * back here.
+   *
+   * @param {number} until epoch ms until which the block holds
+   */
+  restoreIpBlock(until) {
+    const value = Number(until)
+    if (!Number.isFinite(value) || value <= Date.now()) return false
+    this.#ipBlockedUntil = value
+    return true
+  }
+
+  /**
    * Availability test: send one tiny streaming request per model through the
    * same transport inference uses, and classify the outcome.
    *

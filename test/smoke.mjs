@@ -3,9 +3,9 @@
  * Exercises the same code paths DSH will: credential discovery -> listModels
  * -> prepareCall -> stream. No DSH installation required.
  */
-import { OpenCodeLocalAdapter } from './adapter.js'
-import { buildRequestBody, toOpenAIMessages } from './wire.js'
-import { invertedTimestampHex, canonicalSessionID } from './ids.js'
+import { OpenCodeLocalAdapter } from '../adapter.js'
+import { buildRequestBody, toOpenAIMessages } from '../wire.js'
+import { invertedTimestampHex, canonicalSessionID } from '../ids.js'
 
 const logger = {
   info: (...a) => console.log('[info]', ...a),

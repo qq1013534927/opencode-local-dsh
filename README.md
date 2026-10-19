@@ -69,13 +69,42 @@ Click the plugin's name under **Settings → Plugins** to open its card
 
 | Control | What it does |
 | --- | --- |
-| **Free only** toggle | **Checked on a fresh install** — the picker starts with the 11 built-in free models. Untick it to see **every model your account can route** (paid included) |
+| **Free only** toggle | **Checked on a fresh install** — filters the DSH picker *and* the card's table down to the built-in free models. It writes `freeOnly` and nothing else: no model is ticked, hidden or unhidden by it. Untick it to list **every model your account can route** again (paid included — minus any row you hid yourself). The label tracks the table: `Showing N/M · filtered by free-only` or `Showing M · all` |
+| **Tick free only** button | Explicitly hides every paid model (`models.<id>.hidden`) **and** turns the free-only filter on — both land in ONE atomic write, so neither can overwrite the other |
+| **Tick all** button | Clears every `hidden` flag so all models show again; it leaves the free-only switch alone, and that switch still filters the picker |
 | Per-model **show/hide** | Hide a model from the DSH model picker (`models.<id>.hidden`) |
 | Per-model **context / max output** | Shows the effective limit; typing a value overrides it, clearing it returns to auto (`models.<id>.contextWindow`, `maxOutput`) |
 | **Test** (per row) | Send a tiny streaming request to that model and report `OK` / `RATE_LIMIT` / `MODEL_UNAVAILABLE` / `REGION_BLOCKED` / `QUOTA_EXCEEDED` with latency |
-| **Test all** | Probe every listed model; results stream in **one row at a time** (SSE) |
-| **Refresh** / **Save** | Re-read the live lane status / commit the edited model map |
+| **Test all** | Probe the **free models only** (a paid probe spends the account balance); results stream in **one row at a time** (SSE) |
+| **Refresh** / **Save** | Re-read the live lane status / commit the edited model map (`models.<id>.hidden`, `contextWindow`, `maxOutput`). The button is labelled **Save**; *Saved.* is the note it prints afterwards |
 | Lane status line | Credential source, account, and catalog counts (free / paid) |
+
+### Filtering vs. hiding
+
+The switch and the two bulk buttons do **not** write the same thing:
+
+- **Free only** toggle → `freeOnly` only. It filters both the DSH model picker
+  and the card's table; it never writes `models.<id>.hidden`, so no row gets
+  ticked, hidden or restored as a side effect.
+- **Tick free only** → `freeOnly: true` **plus** `models.<id>.hidden` for every
+  paid model (paid rows stay in the map as hidden, so clearing the flag brings
+  them back). Both are submitted as **one operation list**, so they take effect
+  together or not at all — they cannot overwrite each other.
+- **Tick all** → `models.<id>.hidden = false` for every model, so every row is
+  ticked again. It does **not** touch `freeOnly`: with the switch still on, the
+  picker and the table keep listing the free models only.
+- Per-row checkbox / **Save** → the `models.<id>.hidden` (and context/output)
+  map exactly as you edited it.
+
+The checkbox reads the **live lane** state over the loopback bridge
+(`/status`), not the settings page's stored snapshot, so a click takes effect
+immediately and no longer snaps back to its old value.
+
+That snapshot is only a frame captured at render time — it refreshes two async
+hops after a write, so it is a first-paint fallback only. What makes the choice
+survive a restart is the settings page's official write path (`form.mutate`):
+the bridge moves the **running** adapter at once, the official transport makes
+the choice **stick across restarts**.
 
 ### Model scope
 
@@ -90,9 +119,12 @@ authoritative source); the public `models.opencode.ai` feed only fills gaps.
 Context/output values on the card are therefore the real per-model limits, not
 a blanket default.
 
-Live state (roster, availability) rides a loopback-only bridge
-(`/api/opencode-local/settings/status`, `/probe` — the latter is an SSE stream);
-settings writes go through the official `configForms` transport.
+Live state and writes ride a loopback-only bridge
+(`/api/opencode-local/settings/status`, `/filter`, `/probe` — the latter is an
+SSE stream): the card applies filter/visibility changes straight to the running
+adapter and only then persists them through the official settings transport
+(when the host serves a writable form). A click therefore always takes effect,
+even when that form cannot be written.
 
 ## Prerequisites
 

@@ -185,5 +185,34 @@ export function makeSettingsRoutes(handlers, deps = {}) {
         }
       },
     },
+    {
+      /**
+       * Direct filter control.
+       *
+       * The free-only toggle needs to take effect even when the settings form
+       * cannot be written (a read-only revision, a host that serves no form, a
+       * save race). This applies the filter straight to the running adapter and
+       * returns the result, so the switch is never a no-op.
+       *
+       * Body: { freeOnly?: boolean, models?: { [id]: {hidden} } }
+       */
+      kind: 'exact',
+      path: `${SETTINGS_BRIDGE_PREFIX}/filter`,
+      handler: async (req, res) => {
+        if (!check(req, res)) return
+        let body
+        try {
+          body = await readJsonBody(req)
+        } catch {
+          body = undefined
+        }
+        if (body === undefined || typeof body !== 'object' || body === null) {
+          writeJson(res, 400, { ok: false, code: 'bad-request', message: 'unreadable JSON body' })
+          return
+        }
+        const result = await handlers.filter(body)
+        writeJson(res, 200, result)
+      },
+    },
   ]
 }

@@ -329,14 +329,17 @@ export class ModelCatalog {
 
   /**
    * Every model with its visibility/override state — the settings page roster.
-   * With `freeOnly` off (the default for paid users) the whole account catalog
-   * is listed; the card's filter simply flips `freeOnly`.
+   *
+   * This is deliberately the WHOLE account catalog regardless of `freeOnly`
+   * (only explicit `models.<id>.hidden` flags are reported): the card must be
+   * able to show and re-tick a paid row after the user unticks the free-only
+   * filter, which would otherwise look like the switch did nothing. The picker
+   * filter itself stays in `list()`.
    */
   roster() {
     const out = []
     for (const m of this.#models.values()) {
       const override = this.#overrideFor(m.id)
-      if (this.#freeOnly && !isFreeId(m.id)) continue
       const effective = this.#applyOverride(m)
       out.push({
         id: m.id,

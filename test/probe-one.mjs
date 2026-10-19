@@ -1,5 +1,5 @@
 /** Probe one specific model through the plugin's adapter (same code path DSH uses). */
-import { OpenCodeLocalAdapter } from './adapter.js'
+import { OpenCodeLocalAdapter } from '../adapter.js'
 
 const model = process.argv[2] ?? 'deepseek-v4.1-flash-free'
 const logger = {

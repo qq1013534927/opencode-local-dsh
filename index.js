@@ -46,6 +46,53 @@ export function apply(ctx, rawConfig = {}) {
   // Live settings snapshot: re-read whenever the settings page saves.
   let settings = readSettings(rawConfig)
 
+  /**
+   * The Host's settings service, requested lazily: it persists a change into
+   * the Loader entry so the value survives a restart. Absent on a headless
+   * composition, in which case the plugin still applies changes live.
+   */
+  let settingsService = null
+  if (typeof ctx.inject === 'function') {
+    try {
+      void Promise.resolve(
+        ctx.inject(['settings'], (sctx) => {
+          settingsService = sctx.settings ?? null
+        }),
+      )
+    } catch {
+      /* the live path still works without it */
+    }
+  }
+
+  /**
+   * Persist a settings change through the Host service when available.
+   *
+   * This is the plugin's own fallback for changes that originate OUTSIDE the
+   * settings card (a remote control, a script). The card itself persists
+   * through the Host's official settings transport, because only that path
+   * applies an operation list atomically; two separate mutations of the same
+   * entry race, and the later one drops the earlier one's change.
+   */
+  const saveSettings = async (fields) => {
+    const svc = settingsService
+    if (!svc || typeof svc.mutate !== 'function') return false
+    const ops = []
+    if (fields.freeOnly !== undefined) ops.push({ op: 'set', path: ['freeOnly'], value: fields.freeOnly === true })
+    if (fields.models && typeof fields.models === 'object') {
+      for (const [id, entry] of Object.entries(fields.models)) {
+        ops.push({ op: 'set', path: ['models', id], value: entry })
+      }
+    }
+    if (ops.length === 0) return true
+    try {
+      await svc.mutate('opencode-local', ops)
+      return true
+    } catch (err) {
+      logger.warn(`opencode-local: could not persist settings: ${err instanceof Error ? err.message : String(err)}`)
+      return false
+    }
+  }
+
   const adapter = new OpenCodeLocalAdapter(
     {
       logger: {
@@ -120,6 +167,38 @@ export function apply(ctx, rawConfig = {}) {
         const ids = Array.isArray(body.ids) ? body.ids.filter((id) => typeof id === 'string' && id.length > 0) : []
         const results = await adapter.probe(ids, onResult)
         return { ok: true, value: { results } }
+      },
+      /**
+       * Apply filter/visibility changes directly to the running adapter.
+       *
+       * This is the switch's reliable path: it does not depend on the served
+       * settings form being writable, and it reports exactly what took effect.
+       *
+       * Persistence is NOT done here by default: the card writes through the
+       * Host's official settings transport (`form.mutate`), which applies an
+       * operation list atomically. Persisting here as well would race that
+       * write — two mutations of the same entry each rewrite the whole
+       * section, and the later one drops the earlier one's change (this is
+       * how a `freeOnly` write used to erase the per-model hiding flags).
+       *
+       * A caller that is NOT the card (a script, a remote control) can ask
+       * for persistence with `persist: true`.
+       */
+      async filter(body) {
+        const nextFreeOnly = typeof body.freeOnly === 'boolean' ? body.freeOnly : undefined
+        const nextModels = body.models && typeof body.models === 'object' ? body.models : undefined
+        if (nextFreeOnly !== undefined) adapter.setFreeOnly(nextFreeOnly)
+        if (nextModels !== undefined) adapter.setOverrides(toOverrides(nextModels))
+        if (body.persist === true) {
+          void saveSettings({ freeOnly: nextFreeOnly, models: nextModels })
+        }
+        return {
+          ok: true,
+          value: {
+            ...adapter.status(),
+            models: adapter.roster(),
+          },
+        }
       },
     },
     {},

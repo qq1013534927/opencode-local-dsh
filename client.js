@@ -59,9 +59,20 @@ window.__ModuleLoader__.load({
       free: 'free',
       paid: 'paid',
       saving: 'Saving…',
+      save: 'Save',
       saveRejected: 'Save rejected by the host.',
       saveError: 'Save failed',
       noForm: 'Settings form unavailable.',
+      shown: 'Showing',
+      allModels: 'all',
+      filteredOut: 'filtered by free-only',
+      pickFree: 'Tick free only',
+      pickFreeHint: 'Explicitly hide every paid model (models.<id>.hidden) and turn the free-only switch on. The switch alone already filters the picker; this button also persists the hiding.',
+      pickAll: 'Tick all',
+      pickAllHint: 'Clear every hidden flag so all models show again (the free-only switch still filters the picker).',
+      testAllHint: 'Probe the free models only (probing a paid model spends your account balance).',
+      freePicked: 'Free models ticked; paid models hidden.',
+      allPicked: 'All models ticked.',
     }
 
     const zh = {
@@ -94,9 +105,20 @@ window.__ModuleLoader__.load({
       free: '免费',
       paid: '付费',
       saving: '保存中…',
+      save: '保存',
       saveRejected: '保存被宿主拒绝。',
       saveError: '保存失败',
       noForm: '设置表单不可用。',
+      shown: '当前列出',
+      allModels: '全部',
+      filteredOut: '仅免费',
+      pickFree: '只勾选免费',
+      pickFreeHint: '把全部付费模型显式标记为隐藏（写 models.<id>.hidden），并打开只看免费。只切换开关本身已经足以过滤选择器；本按钮额外把隐藏标记持久化。',
+      pickAll: '全部勾选',
+      pickAllHint: '清除全部隐藏标记，让全部模型重新显示（只看免费 开关仍会过滤选择器）。',
+      testAllHint: '只测免费模型（测试付费模型会消耗你账号的余额）。',
+      freePicked: '已勾选免费模型，付费模型已隐藏。',
+      allPicked: '已勾选全部模型。',
     }
 
     // -- styles (theme tokens only) ----------------------------------------
@@ -185,6 +207,8 @@ window.__ModuleLoader__.load({
       const [probing, setProbing] = React.useState({})
       const [busy, setBusy] = React.useState(false)
       const [note, setNote] = React.useState('')
+      /** Optimistic free-only value while the bridge round-trips (null = trust the bridge). */
+      const [filterLocal, setFilterLocal] = React.useState(null)
       // Local draft of the per-model map; committed through mutate on change.
       const [draft, setDraft] = React.useState(modelsValue)
 
@@ -211,18 +235,79 @@ window.__ModuleLoader__.load({
         void loadStatus()
       }, [loadStatus])
 
-      /** Write one model's entry into the volatile map via a path op. */
+      /**
+       * Persist a change through the OFFICIAL settings transport.
+       *
+       * `props.form` is the served entry's `ConfigPageForm` (`{ state, mutate }`)
+       * — a render-time snapshot of the Host's settings store. `state.writable`
+       * says whether the Host accepts writes, and `state.revision` is the
+       * conflict token the Host validates against.
+       *
+       * The bridge applies a change to the RUNNING adapter; only this path
+       * makes it survive a restart, so every write goes through both: the
+       * bridge first (so the UI reacts at once), then the form (so it sticks).
+       *
+       * All fields of one action are submitted as ONE operation list, because
+       * the Host applies an operation list atomically — two separate calls
+       * would each rewrite the whole entry and the second would drop the
+       * first's change.
+       *
+       * @param {Array<[string[], unknown]>} entries path segments + value pairs
+       */
+      const persist = React.useCallback(
+        async (entries) => {
+          if (typeof form.mutate !== 'function') return false
+          const writable = form.state?.writable !== false
+          if (!writable) return false
+          const ops = entries.map(([path, value]) => ({ op: 'set', path, value }))
+          if (ops.length === 0) return true
+          try {
+            const accepted = await form.mutate(ops, form.state?.revision)
+            if (accepted === false) {
+              setNote(t('saveRejected'))
+              return false
+            }
+            return true
+          } catch (err) {
+            setNote(`${t('saveError')}: ${String(err?.message ?? err)}`)
+            return false
+          }
+        },
+        [form, t],
+      )
+
+      /**
+       * Write one model's entry.
+       *
+       * Applied through the bridge (live) and persisted by the Host when a
+       * settings surface exists — the same reliable path the bulk actions use.
+       */
       const patchModel = React.useCallback(
         (id, patch) => {
           const current = draft?.[id] ?? { hidden: false, contextWindow: 0, maxOutput: 0 }
           const next = { ...current, ...patch }
           const nextDraft = { ...draft, [id]: next }
           setDraft(nextDraft)
-          if (typeof form.mutate === 'function') {
-            void form.mutate([{ op: 'set', path: ['models', id], value: next }], revision)
-          }
+          void bridge('/filter', { models: { [id]: next } })
+            .then((payload) => {
+              if (payload?.ok && payload.value) {
+                setStatus(payload.value)
+                setRoster(Array.isArray(payload.value.models) ? payload.value.models : [])
+              }
+            })
+            .catch((err) => setNote(`${t('saveError')}: ${String(err?.message ?? err)}`))
+          // Persist the same entry so it survives a restart.
+          void persist([[['models', id], next]])
         },
-        [draft, form, revision],
+        [draft, t, persist],
+      )
+
+      /**
+       * The card's own roster uses the shared free-id rule (see isFreeId).
+       */
+      const isFree = React.useCallback(
+        (id) => String(id ?? '').toLowerCase().includes('free') || String(id ?? '').toLowerCase() === 'big-pickle',
+        [],
       )
 
       /** The rows the card shows: live roster merged with the edited draft. */
@@ -235,14 +320,114 @@ window.__ModuleLoader__.load({
             merged.push({
               id,
               hidden: draft[id]?.hidden === true,
-              free: id.includes('free'),
+              free: isFree(id),
               contextWindow: 0,
               maxOutput: 0,
             })
           }
         }
         return merged.sort((a, b) => a.id.localeCompare(b.id))
-      }, [roster, draft])
+      }, [roster, draft, isFree])
+
+      /**
+       * The free-only switch's displayed value.
+       *
+       * Order of authority:
+       *   1. `filterLocal` — the optimistic value between a click and the
+       *      bridge's answer, so the box never flickers.
+       *   2. the live adapter state from the bridge (`status.freeOnly`) — this is
+       *      what actually filters the model picker right now.
+       *   3. the served settings form value — only as a fallback before the
+       *      first /status answer arrives.
+       *
+       * The served form is deliberately LAST: it is a snapshot of the stored
+       * settings, it does not refresh when the loopback bridge writes, and
+       * trusting it first made the box snap back to its old state right after a
+       * click (the "click does nothing" report).
+       */
+      const liveFreeOnly = typeof status?.freeOnly === 'boolean' ? status.freeOnly : undefined
+      const freeOnlyValue =
+        filterLocal !== null ? filterLocal : liveFreeOnly !== undefined ? liveFreeOnly : value.freeOnly === true
+
+      /**
+       * What the table lists.
+       *
+       * `roster` is always the WHOLE account catalog (so a paid row is still
+       * there the moment the filter goes off), which means the table has to
+       * apply the filter itself — otherwise ticking 只看免费 visibly changed
+       * nothing but the picker, and the card looked like the switch "was not
+       * implemented".
+       */
+      const shown = React.useMemo(
+        () => (freeOnlyValue ? ordered.filter((m) => m.free === true || isFree(m.id)) : ordered),
+        [ordered, freeOnlyValue, isFree],
+      )
+
+      /**
+       * Bulk action: "only tick the free models".
+       *
+       * Hides every paid model and turns the free-only filter on.
+       *
+       * Both halves are written in ONE request and, more importantly, ONE
+       * `form.mutate` operation list: the Host applies an operation list
+       * atomically, whereas two separate mutations of the same entry each
+       * rewrite the whole section and the later one drops the earlier half.
+       */
+      const selectFreeOnly = React.useCallback(async () => {
+        const source = ordered.length > 0 ? ordered : roster
+        const next = { ...draft }
+        for (const m of source) {
+          const free = m.free === true || isFree(m.id)
+          const entry = next[m.id] ?? { hidden: false, contextWindow: 0, maxOutput: 0 }
+          next[m.id] = { ...entry, hidden: !free }
+        }
+        setDraft(next)
+        setFilterLocal(true)
+        setNote(t('saving'))
+        try {
+          // The bridge applies the flags to the running adapter; the official
+          // settings transport below makes them survive a restart.
+          const payload = await bridge('/filter', { freeOnly: true, models: next })
+          if (!payload?.ok || !payload.value) throw new Error(payload?.message ?? 'filter rejected')
+          setStatus(payload.value)
+          setRoster(Array.isArray(payload.value.models) ? payload.value.models : [])
+          setNote(t('freePicked'))
+        } catch (err) {
+          setFilterLocal(null)
+          setNote(`${t('saveError')}: ${String(err?.message ?? err)}`)
+          void loadStatus()
+          return
+        }
+        // ONE atomic operation list: the filter flag and the per-model flags
+        // land together or not at all.
+        await persist([[['freeOnly'], true], ...Object.entries(next).map(([id, entry]) => [['models', id], entry])])
+        setFilterLocal(null)
+      }, [ordered, roster, draft, isFree, t, persist])
+
+      /**
+       * Bulk action: show every model again (clear every hidden flag).
+       */
+      const selectAll = React.useCallback(async () => {
+        const source = ordered.length > 0 ? ordered : roster
+        const next = { ...draft }
+        for (const m of source) {
+          const entry = next[m.id] ?? { hidden: false, contextWindow: 0, maxOutput: 0 }
+          next[m.id] = { ...entry, hidden: false }
+        }
+        setDraft(next)
+        try {
+          const payload = await bridge('/filter', { models: next })
+          if (payload?.ok && payload.value) {
+            setStatus(payload.value)
+            setRoster(Array.isArray(payload.value.models) ? payload.value.models : [])
+          }
+          setNote(t('allPicked'))
+        } catch (err) {
+          setNote(`${t('saveError')}: ${String(err?.message ?? err)}`)
+          return
+        }
+        await persist(Object.entries(next).map(([id, entry]) => [['models', id], entry]))
+      }, [ordered, roster, draft, t, persist])
 
       /**
        * Availability test over SSE: the bridge pushes one `result` event per
@@ -251,7 +436,12 @@ window.__ModuleLoader__.load({
        */
       const runProbe = React.useCallback(
         async (ids) => {
-          const targets = Array.isArray(ids) && ids.length > 0 ? ids : ordered.map((m) => m.id)
+          // Default target: the FREE models only — probing a paid model spends
+          // the account's balance.
+          const targets =
+            Array.isArray(ids) && ids.length > 0
+              ? ids
+              : ordered.filter((m) => m.free === true || isFree(m.id)).map((m) => m.id)
           setBusy(true)
           setNote(t('testing'))
           setProbing(Object.fromEntries(targets.map((id) => [id, true])))
@@ -308,16 +498,25 @@ window.__ModuleLoader__.load({
             setProbing({})
           }
         },
-        [t, ordered],
+        [t, ordered, isFree],
       )
 
-      const commit = React.useCallback(() => {
-        if (typeof form.mutate === 'function') {
-          const ops = Object.entries(draft).map(([id, entry]) => ({ op: 'set', path: ['models', id], value: entry }))
-          void form.mutate(ops, revision)
+      /** Commit the whole edited map through the bridge + the official transport. */
+      const commit = React.useCallback(async () => {
+        setNote(t('saving'))
+        try {
+          const payload = await bridge('/filter', { models: draft })
+          if (payload?.ok && payload.value) {
+            setStatus(payload.value)
+            setRoster(Array.isArray(payload.value.models) ? payload.value.models : [])
+          }
+          setNote(t('saved'))
+        } catch (err) {
+          setNote(`${t('saveError')}: ${String(err?.message ?? err)}`)
+          return
         }
-        setNote(t('saved'))
-      }, [draft, form, revision, t])
+        await persist(Object.entries(draft).map(([id, entry]) => [['models', id], entry]))
+      }, [draft, t, persist])
 
       const statusLine = status
         ? `${t('tokenSource')}: ${status.tokenSource}${status.account ? ` · ${t('account')}: ${status.account}` : ''} · ${t('catalog')}: ${status.catalog?.exposed ?? 0}/${status.catalog?.total ?? 0}`
@@ -329,38 +528,43 @@ window.__ModuleLoader__.load({
         : ''
 
       /**
-       * The free-only switch's authoritative value: the SERVED FORM's own field
-       * (what the Host wrote), falling back to the bridge status until the form
-       * has resolved. Reading the form keeps the checkbox in step with the
-       * settings store rather than with a transient local guess.
-       */
-      const freeOnlyValue = value.freeOnly !== undefined ? value.freeOnly === true : Boolean(status?.freeOnly)
-
-      /**
        * One-click free-only filter.
        *
-       * The write goes through the official settings transport; the result is
-       * reported so a rejected save (revision mismatch, validation) is visible
-       * instead of the checkbox silently snapping back.
+       * Applied through the loopback bridge (which drives the running adapter),
+       * so the switch works regardless of whether the served settings form can
+       * be written. When the form IS writable the same change is also written
+       * through the official settings transport, so the value survives a
+       * restart — the bridge alone only moves the live adapter.
+       *
+       * This writes `freeOnly` and NOTHING else. It used to also clear every
+       * `hidden` flag when unticked, which ticked all 48 model rows and rewrote
+       * the whole per-model map in the profile for a one-bit toggle — that is
+       * the "it ticks everything" report. Hiding paid rows is the separate,
+       * explicitly labelled bulk button's job.
        */
       const setFreeOnlyFilter = async (next) => {
-        if (typeof form.mutate !== 'function') {
-          setNote(t('noForm'))
-          return
-        }
+        setFilterLocal(next)
         setNote(t('saving'))
         try {
-          const accepted = await form.mutate([{ op: 'set', path: ['freeOnly'], value: next }], revision)
-          if (accepted === false) {
-            setNote(t('saveRejected'))
-            return
-          }
+          const payload = await bridge('/filter', { freeOnly: next })
+          if (!payload?.ok || !payload.value) throw new Error(payload?.message ?? 'filter rejected')
+          // The bridge returns the live adapter state; adopt it and drop the
+          // optimistic value in the same tick, so nothing can snap back.
+          setStatus(payload.value)
+          setRoster(Array.isArray(payload.value.models) ? payload.value.models : [])
+          setFilterLocal(null)
           setNote(next ? t('freeOnlyOn') : t('freeOnlyOff'))
         } catch (err) {
+          setFilterLocal(null)
           setNote(`${t('saveError')}: ${String(err?.message ?? err)}`)
+          // Re-sync with whatever the adapter really holds.
+          void loadStatus()
+          return
         }
-        // The Host applies the filter live; re-read so the rows follow.
-        window.setTimeout(() => void loadStatus(), 300)
+        // Persist through the official settings transport when it is writable.
+        // This is what makes the choice survive a restart; the bridge above
+        // only moves the running adapter.
+        await persist([[['freeOnly'], next]])
       }
 
       return h(
@@ -372,12 +576,22 @@ window.__ModuleLoader__.load({
           { style: S.row },
           h('span', { style: S.muted }, `${t('status')}: ${statusLine}`),
           h('button', { style: S.button, onClick: () => void loadStatus() }, t('refresh')),
+          // Bulk visibility: only the free models ticked (paid rows hidden), or
+          // everything ticked again.
+          h(
+            'button',
+            { style: S.button, disabled: busy, title: t('pickFreeHint'), onClick: () => void selectFreeOnly() },
+            t('pickFree'),
+          ),
+          h('button', { style: S.button, disabled: busy, title: t('pickAllHint'), onClick: () => void selectAll() }, t('pickAll')),
           h(
             'button',
             {
               style: S.button,
               disabled: busy,
-              onClick: () => void runProbe(ordered.map((m) => m.id)),
+              title: t('testAllHint'),
+              // Only the free models are probed: paid ones cost the account.
+              onClick: () => void runProbe(ordered.filter((m) => m.free === true || isFree(m.id)).map((m) => m.id)),
             },
             busy ? t('testing') : t('testAll'),
           ),
@@ -393,6 +607,16 @@ window.__ModuleLoader__.load({
             h('span', { style: S.muted }, t('freeOnly')),
             countsLine ? h('span', { style: S.muted }, `(${countsLine})`) : null,
           ),
+          // What the table below currently lists — makes the filter's effect
+          // explicit instead of leaving the switch with nothing to show. Kept
+          // OUTSIDE the label so clicking the readout cannot toggle the switch.
+          h(
+            'span',
+            { style: S.muted },
+            freeOnlyValue
+              ? `${t('shown')} ${shown.length}/${ordered.length} · ${t('filteredOut')}`
+              : `${t('shown')} ${ordered.length} · ${t('allModels')}`,
+          ),
           note ? h('span', { style: S.muted }, note) : null,
         ),
         // header
@@ -405,13 +629,13 @@ window.__ModuleLoader__.load({
           h('span', null, t('maxOutput')),
           h('span', null, ''),
         ),
-        // rows
-        ordered.length === 0
+        // rows — `shown` follows the free-only switch, `ordered` is the whole roster
+        shown.length === 0
           ? h('div', { style: S.muted }, t('noModels'))
           : h(
               'div',
               { style: S.grid },
-              ...ordered.map((m) => {
+              ...shown.map((m) => {
                 const entry = draft[m.id] ?? {}
                 const hidden = entry.hidden === true
                 const result = results[m.id]
@@ -473,7 +697,7 @@ window.__ModuleLoader__.load({
                 )
               }),
             ),
-        h('div', { style: S.row }, h('button', { style: S.button, onClick: commit }, t('saved'))),
+        h('div', { style: S.row }, h('button', { style: S.button, onClick: commit }, t('save'))),
       )
     }
 

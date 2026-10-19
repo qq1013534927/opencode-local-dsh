@@ -1,104 +1,127 @@
-# opencode-local — DSH 插件：走自己的 OpenCode 通道，不走共享额度
+# opencode-local — DSH plugin: your own OpenCode lane, never the shared quota
 
-在 DeepSeek Harness (DSH) 里使用**你自己账号**的 OpenCode Zen 免费模型。
+Use **your own account's** OpenCode Zen free models inside DeepSeek Harness (DSH).
 
-> **不走共享额度。** 与 [opencode2dsh](https://github.com/FishBottle7/opencode2dsh) 的匿名通道
-> （`Bearer public`，全匿名用户共享、按 IP 限流、429 频发）不同，本插件用**你自己登录的
-> OpenCode 账号 token** 直连 `https://opencode.ai/zen/v1`——免费额度是你账号私有的，
-> 不与他人共享。
+> **Never the shared quota.** Unlike the
+> [opencode2dsh](https://github.com/FishBottle7/opencode2dsh) anonymous lane
+> (`Bearer public` — shared by every anonymous user, IP-rate-limited, frequent
+> 429s), this plugin calls `https://opencode.ai/zen/v1` with **your own logged-in
+> OpenCode account token** — the free quota is private to your account.
 
-## 它做什么
+## How it works
 
 ```
-DSH 会话
-  │  harness chunk（block-start / text-delta / usage / finish …）
+DSH session
+  │  harness chunks (block-start / text-delta / usage / finish …)
   ▼
-OpenCodeLocalAdapter（原生 LlmAdapter，注册为 opencode-local）
-  │  ① 凭据：运行中的 OpenCode 客户端 /api/credential（或本地 DB 缓存）
-  │  ② 传输：spawn Bun 中继（TLS 指纹与官方 CLI 一致 → 健康配额桶）
-  │  ③ 门形状：canonical ses_ 会话 id + stream + bash/read 工具
+OpenCodeLocalAdapter (native LlmAdapter, registered as `opencode-local`)
+  │  ① Credential: running OpenCode client /api/credential (or local DB cache)
+  │  ② Transport: spawns a Bun relay (TLS fingerprint matches the official CLI)
+  │  ③ Gate shape: canonical ses_ session id + stream + bash/read tools
   ▼
-https://opencode.ai/zen/v1  ← 你自己的账号 token
+https://opencode.ai/zen/v1  ← YOUR account token
 ```
 
-## 为什么需要 Bun 中继
+## Why the Bun relay
 
-实测发现 opencode.ai 网关**按 TLS 指纹分限流桶**：
+The opencode.ai gateway **rate-limits by TLS fingerprint**:
 
-| 传输层 | TLS 指纹 | 配额桶 |
+| Transport | TLS fingerprint | Quota bucket |
 | --- | --- | --- |
-| 官方 OpenCode CLI（Bun 编译） | Bun | ✅ 健康（你的桌面客户端一直能用） |
-| Node / Python / curl | 其他 | ❌ 共享桶已耗尽（429，Retry-After ~16h） |
+| Official OpenCode CLI (Bun-compiled) | Bun | ✅ healthy (your desktop client keeps working) |
+| Node / Python / curl | anything else | ❌ shared bucket exhausted (429, Retry-After ~16 h) |
 
-插件 spawn 一个 Bun 进程（`relay.mjs`）发请求，TLS 指纹与官方 CLI 一致，进入健康配额桶。
-Bun 不可用时自动回退 Node 直连（冷门 free 模型仍可用）。
+The plugin spawns a Bun process (`relay.mjs`) for inference — its TLS fingerprint
+matches the CLI's, reaching the healthy quota bucket. Falls back to a direct Node
+fetch when Bun is missing (cold free models still work there).
 
-## 前提
+## Prerequisites
 
-- **OpenCode 客户端登录过一次**（桌面版或 `opencode serve`）。
-  - 客户端运行时：插件从 `/api/credential` 取活跃 token（自动刷新）。
-  - 客户端关闭时：插件从本地 SQLite（`~/.local/share/opencode/opencode.db`）读缓存 token，
-    只要没过期就能用。过期后打开客户端刷新一次即可。
-- **Bun 运行时**（`npm install -g bun`）——用于 TLS 指纹匹配；缺失时回退 Node 直连。
-- DSH ≥ 0.1.7，Node.js ≥ 20。
+- **OpenCode client logged in once** (desktop app or `opencode serve`).
+  - Client running: plugin reads the active token from `/api/credential`
+    (auto-refreshed).
+  - Client closed: plugin reads the cached token from the local SQLite DB
+    (`~/.local/share/opencode/opencode.db`) — works until the token expires;
+    reopen the client once to refresh.
+- **Bun runtime** (`npm install -g bun`) — for the TLS fingerprint match;
+  falls back to Node direct fetch when unavailable.
+- DSH ≥ 0.1.7, Node.js ≥ 20.
 
-## 安装
+## Install
 
 ```sh
-dsh plugin --profile <profile> add <本目录>
+dsh plugin --profile <profile> add <this directory>
 ```
 
-或 DSH 界面：设置 → 插件 → 安装本地 bundle。
+Or via the DSH UI: Settings → Plugins → install local bundle.
 
-## 验证
+## Verify
 
-1. 重启 DSH（或等待插件热加载）。
-2. 模型选择器出现 **OpenCode Local** 分组，列出你账号的 free 模型
-   （`glm-5.3-flash-free`、`mimo-v2.6-flash-free`、`deepseek-v4.1-flash-free`、
-   `longcat-2.5-preview-free`、`big-pickle` 等）。
-3. 发送消息，观察流式回复。
-4. 诊断状态：`~/.opencode-local-dsh/adapter-status.json`。
+1. Restart DSH (or wait for the plugin hot-reload).
+2. The model picker shows an **OpenCode Local** group with your account's free
+   models (`glm-5.3-flash-free`, `mimo-v2.6-flash-free`,
+   `deepseek-v4.1-flash-free`, `longcat-2.5-preview-free`, `big-pickle`, …).
+3. Send a message and watch the streaming reply.
+4. Diagnostics: `~/.opencode-local-dsh/adapter-status.json`.
 
-## 配置（cordis.patch.yml 的 config 对象）
+## Configuration (cordis.patch.yml `config` object)
 
-| 字段 | 默认 | 说明 |
+| Field | Default | Meaning |
 | --- | --- | --- |
-| `freeOnly` | `true` | 只暴露 free 模型；`false` 暴露账号全部模型 |
-| `refreshSeconds` | `300` | 模型目录刷新间隔（秒） |
-| `accessToken` | — | 显式 access token 覆盖（留空则自动获取） |
+| `freeOnly` | `true` | Only expose free models; `false` exposes the whole account catalog |
+| `refreshSeconds` | `300` | Model catalog refresh interval (seconds) |
+| `accessToken` | — | Explicit access token override (empty = auto-resolve) |
 
-## 凭据来源（三级回退）
+## Credential resolution (three-level fallback)
 
-1. 运行中客户端的 `/api/credential`（支持 token 自动刷新）
-2. 本地 SQLite 缓存 `~/.local/share/opencode/opencode.db`（客户端关闭时）
-3. 报错提示（token 过期且客户端未运行）
+1. Running client's `/api/credential` (supports token auto-refresh)
+2. Local SQLite cache `~/.local/share/opencode/opencode.db` (client may be closed)
+3. Error asking you to open the client (token expired and client not running)
 
-token 仅保存在内存，插件不写盘。
+The token lives in memory only; the plugin never writes it to disk.
 
-## 错误码说明
+## Error codes
 
-- `429 FreeUsageLimitError`：账号免费额度限流；DSH 自动重试，仍失败换模型（各模型配额独立）。
-- `403 RegionError`：该模型不向当前地区提供，换模型。
-- `402 Insufficient funds`：账号余额不足（付费模型）。
-- `bun relay produced no status line`：Bun 中继异常，检查 `bun --version`。
+- `429 FreeUsageLimitError`: per-account free-tier throttling; DSH retries
+  automatically — switch models if it persists (quotas are per-model).
+- `403 RegionError`: the model is not offered in your region; switch models.
+- `402 Insufficient funds`: account balance too low (paid models).
+- `bun relay produced no status line`: the Bun relay misbehaved; check `bun --version`.
 
-## 文件结构
+## Project layout
 
 ```
 opencode-local-dsh/
-├── index.js        # 插件入口：注册 LlmAdapter、目录刷新、状态文件
-├── adapter.js      # DSH LlmAdapter 实现（providerInfo/listModels/resolveModel/stream）
-├── wire.js         # 传输层：Bun 中继 + Node 回退、SSE 解析、harness chunk 构建
-├── relay.mjs       # Bun 中继进程（stdin 收请求，stdout 转发 SSE）
-├── credential.js   # 凭据解析：服务发现 → /api/credential → 本地 DB 回退
-├── catalog.js      # 模型目录：Zen /v1/models + models.opencode.ai 元数据增强
-├── ids.js          # canonical 会话 id 派生 + CLI 同形请求头
-├── locale/         # 界面文案（en / zh）
-├── icon.svg        # 插件图标
+├── index.js       plugin entry: adapter registration, catalog refresh, status file
+├── adapter.js     DSH LlmAdapter implementation (providerInfo/listModels/resolveModel/stream)
+├── wire.js        transport: Bun relay + Node fallback, SSE parsing, harness chunk building
+├── relay.mjs      Bun relay process (request on stdin, forwards SSE on stdout)
+├── credential.js  credential resolution: service discovery → /api/credential → local DB fallback
+├── catalog.js     model catalog: Zen /v1/models + models.opencode.ai enrichment
+├── ids.js         canonical ses_ session id derivation + CLI-shaped headers
+├── locale/        UI strings (en / zh)
+├── icon.svg       plugin icon
 ├── cordis.patch.yml
-└── test/           # 开发测试（probe-one.mjs / smoke.mjs）
+└── test/          development tests (probe-one.mjs / smoke.mjs)
 ```
 
-## 许可
+## Acknowledgments
+
+- [**opencode2dsh**](https://github.com/FishBottle7/opencode2dsh) by
+  [FishBottle7](https://github.com/FishBottle7) — the reference DSH integration
+  for OpenCode Zen; this plugin keeps its adapter shape but replaces the shared
+  anonymous lane with your own account's channel.
+- [**opencode2api**](https://github.com/jasonxu114514/opencode2api) by
+  [@jasonxu114514](https://github.com/jasonxu114514) — the legacy Go sidecar in
+  `legacy/agent` is a port of its anonymous-lane implementation, and the catalog
+  fallback chain and request-disguise details are derived from it. This project
+  stands on its shoulders.
+- [OpenCode](https://opencode.ai) — for running the free anonymous Zen lane.
+- [@earendil-works/pi-ai](https://www.npmjs.com/package/@earendil-works/pi-ai) —
+  the wire layer used by adapter mode.
+- [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) and the
+  [dsh-market](https://github.com/dsh-market/dsh-market) community.
+
+## License
 
 MIT

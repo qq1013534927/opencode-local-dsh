@@ -1,0 +1,10 @@
+# opencode-local DSH plugin — route DSH through YOUR OWN running OpenCode client.
+#
+# Reads the local OpenCode service discovery file and account credential,
+# then registers an `opencode-local` LlmAdapter that streams from
+# https://opencode.ai/zen/v1 with YOUR account's token — never the anonymous
+# `public` lane. Override options via the config object below.
+- insert:
+    - id: opencode-local
+      name: '@local/opencode-local'
+      config: {}

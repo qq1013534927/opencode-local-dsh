@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "OpenCode Local Lane",
+    "description": "Route model calls through your own running OpenCode client and its account's free Zen models — not the shared anonymous lane."
+  }
+}

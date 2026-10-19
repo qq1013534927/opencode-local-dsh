@@ -1,0 +1,251 @@
+/**
+ * The DSH LlmAdapter for the user's own OpenCode lane.
+ *
+ * Adapter contract (dsh-llm, structural — no host import):
+ *   providerInfo(provider) / listModels(provider) / resolveModel(provider, model)
+ *   prepareCall(provider, model, signal) -> { model, stream(options) }
+ *   providerRetryPolicy(provider)
+ */
+
+import { ModelCatalog, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './catalog.js'
+import { streamChat } from './wire.js'
+import { resolveLocalOpencode } from './credential.js'
+
+export const PROVIDER_ID = 'opencode-local'
+
+/** Reasoning effort ladder (dsh-llm treats ids as opaque). */
+export const REASONING_EFFORT_LADDER = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
+const DEFAULT_EFFORT_LADDER = ['off', 'minimal', 'low', 'medium', 'high']
+
+/** Advertised effort list for a reasoning model. */
+export function reasoningEfforts(capability) {
+  if (!capability?.reasoning) return undefined
+  const declared = []
+  for (const value of capability.effortValues ?? []) {
+    const level = value === 'none' ? 'off' : value
+    if (REASONING_EFFORT_LADDER.includes(level) && !declared.includes(level)) declared.push(level)
+  }
+  const levels = declared.length > 0
+    ? declared.sort((a, b) => REASONING_EFFORT_LADDER.indexOf(a) - REASONING_EFFORT_LADDER.indexOf(b))
+    : DEFAULT_EFFORT_LADDER
+  return levels.map((level) => ({ id: level, name: level.charAt(0).toUpperCase() + level.slice(1) }))
+}
+
+/** Retry policy the host runs for this provider (own-account lane is per-account rate limited). */
+export const OWN_LANE_RETRY_POLICY = Object.freeze({
+  mode: 'normal',
+  maxRetries: 8,
+  retryableCodes: Object.freeze(['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT']),
+  initialDelayMs: 1_000,
+  maxDelayMs: 20_000,
+  jitterRatio: 0.2,
+})
+
+/**
+ * Token holder: resolves once; invalidation (after AUTH failure) re-resolves
+ * from the running OpenCode. The token never touches disk.
+ */
+class TokenHolder {
+  #resolved = null
+  #resolving = null
+  #logger
+  #explicitToken
+
+  constructor(logger, explicitToken) {
+    this.#logger = logger
+    this.#explicitToken = explicitToken
+  }
+
+  get current() {
+    return this.#resolved
+  }
+
+  resolve() {
+    if (this.#resolved) return Promise.resolve(this.#resolved)
+    if (this.#resolving) return this.#resolving
+    this.#resolving = resolveLocalOpencode(this.#explicitToken, this.#logger)
+      .then((value) => {
+        this.#resolved = value
+        this.#resolving = null
+        return value
+      })
+      .catch((err) => {
+        this.#resolving = null
+        throw err
+      })
+    return this.#resolving
+  }
+
+  invalidate() {
+    this.#resolved = null
+  }
+}
+
+export class OpenCodeLocalAdapter {
+  #catalog
+  #logger
+  #tokens
+
+  constructor(deps, explicitToken) {
+    this.#logger = deps.logger
+    this.#tokens = new TokenHolder(deps.logger, explicitToken)
+    this.#catalog = new ModelCatalog({
+      refreshSeconds: deps.refreshSeconds,
+      freeOnly: deps.freeOnly,
+      onRefresh: (snapshot, lastError) => {
+        if (lastError) this.#logger.warn(`opencode-local: catalog refresh issue: ${lastError}`)
+      },
+    })
+    this.#catalog.setTokenProvider(() => this.#tokens.current?.accessToken ?? '')
+  }
+
+  providerInfo(provider) {
+    return { id: provider, name: 'OpenCode Local' }
+  }
+
+  providerRetryPolicy(_provider) {
+    return OWN_LANE_RETRY_POLICY
+  }
+
+  imageRequestPricing(_provider, _model) {
+    return undefined
+  }
+
+  async #ensureToken() {
+    const resolved = await this.#tokens.resolve()
+    return resolved.accessToken
+  }
+
+  /** Warm the token + one catalog round before the host snapshots listModels. */
+  async warm() {
+    await this.#ensureToken()
+    await this.#catalog.refreshOnce()
+  }
+
+  async listModels(provider) {
+    try {
+      await this.#ensureToken()
+      if (this.#catalog.list().length === 0) await this.#catalog.refreshOnce()
+    } catch (err) {
+      this.#logger.warn(`opencode-local: listModels warm-up failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    return this.#catalog.list().map((m) => ({
+      provider,
+      id: m.id,
+      name: m.id,
+      inputModalities: m.inputModalities.includes('image') ? ['text', 'image'] : ['text'],
+    }))
+  }
+
+  #modelInfo(model) {
+    return (
+      this.#catalog.get(model) ?? {
+        id: model,
+        contextWindow: DEFAULT_CONTEXT_WINDOW,
+        maxOutput: DEFAULT_MAX_TOKENS,
+        reasoning: false,
+        effortValues: [],
+        inputModalities: ['text'],
+      }
+    )
+  }
+
+  resolveModel(provider, model) {
+    const info = this.#modelInfo(model)
+    const resolved = {
+      provider,
+      id: model,
+      name: model,
+      inputModalities: info.inputModalities.includes('image') ? ['text', 'image'] : ['text'],
+      context: { contextWindow: info.contextWindow },
+      defaultMaxTokens: info.maxOutput,
+    }
+    const efforts = reasoningEfforts({ reasoning: info.reasoning, effortValues: info.effortValues })
+    if (efforts) resolved.reasoning = { efforts }
+    return resolved
+  }
+
+  async prepareCall(provider, model, _signal) {
+    await this.#ensureToken().catch(() => {})
+    return {
+      model: this.resolveModel(provider, model),
+      stream: (options) => this.stream(options),
+    }
+  }
+
+  /** The main stream: one retry on AUTH failure (token rotation), then usage/finish. */
+  async *stream(options) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let token
+      try {
+        token = await this.#ensureToken()
+      } catch (err) {
+        yield {
+          type: 'finish',
+          reason: { kind: 'error', failure: { message: `opencode-local: ${err?.message ?? err}`, code: 'TRANSPORT' } },
+        }
+        return
+      }
+      let sawAuthFailure = false
+      let usageChunk
+      let finishChunk
+      for await (const chunk of streamChat(this.#toWireOptions(options), token)) {
+        if (chunk.type === 'usage') {
+          usageChunk = chunk
+          continue
+        }
+        if (chunk.type === 'finish') {
+          finishChunk = chunk
+          if (chunk.reason?.kind === 'error' && chunk.reason.failure?.code === 'AUTH') sawAuthFailure = true
+          continue
+        }
+        yield chunk
+      }
+      if (sawAuthFailure && attempt === 0) {
+        this.#tokens.invalidate()
+        continue
+      }
+      if (usageChunk) yield usageChunk
+      if (finishChunk) yield finishChunk
+      return
+    }
+  }
+
+  #toWireOptions(options) {
+    const messages = Array.isArray(options.messages) ? options.messages : []
+    const wireMessages = messages.map((m) => ({
+      role: m.role ?? 'user',
+      content: m.content,
+      toolCalls: Array.isArray(m.content)
+        ? m.content.filter((b) => b?.type === 'tool-call')
+        : undefined,
+      toolCallId: typeof m.toolCallId === 'string' ? m.toolCallId : undefined,
+    }))
+    return {
+      model: String(options.model ?? ''),
+      messages: wireMessages,
+      system: typeof options.system === 'string' ? options.system : undefined,
+      tools: Array.isArray(options.tools) ? options.tools : undefined,
+      maxTokens: typeof options.maxTokens === 'number' ? options.maxTokens : undefined,
+      temperature: typeof options.temperature === 'number' ? options.temperature : undefined,
+      reasoningEffort:
+        typeof options.reasoningEffort === 'string'
+          ? options.reasoningEffort
+          : typeof options.reasoning === 'string'
+            ? options.reasoning
+            : undefined,
+      signal: options.signal,
+    }
+  }
+
+  /** Diagnostics surface. */
+  status() {
+    const catalog = this.#catalog.snapshot()
+    return {
+      tokenSource: this.#tokens.current?.source ?? 'unresolved',
+      account: this.#tokens.current?.account,
+      catalog: { total: catalog.total, exposed: catalog.exposed, status: catalog.status },
+    }
+  }
+}

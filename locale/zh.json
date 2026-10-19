@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "本机 OpenCode 通道",
+    "description": "把模型请求路由到自己电脑上正在运行的 OpenCode 客户端，使用自己账号的 Zen 免费模型，不走匿名共享通道。"
+  }
+}

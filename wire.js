@@ -227,9 +227,21 @@ function bunRelay(request, signal) {
   })
 
   const kill = () => { try { proc.kill() } catch { /* already gone */ } }
+  let aborted = false
   if (signal) {
-    if (signal.aborted) kill()
-    else signal.addEventListener('abort', kill, { once: true })
+    if (signal.aborted) {
+      aborted = true
+      kill()
+    } else {
+      signal.addEventListener(
+        'abort',
+        () => {
+          aborted = true
+          kill()
+        },
+        { once: true },
+      )
+    }
   }
 
   proc.stdin.on('error', () => {})
@@ -239,28 +251,44 @@ function bunRelay(request, signal) {
     let buffer = ''
     let status = null
     let errorText = ''
-    for await (const chunk of proc.stdout) {
-      const spawnErr = await Promise.race([spawnFailed, Promise.resolve(null)])
-      if (spawnErr) throw spawnErr
-      buffer += chunk.toString('utf8')
-      let nl
-      while ((nl = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, nl).replace(/\r$/, '')
-        buffer = buffer.slice(nl + 1)
-        if (status === null) {
-          if (line.startsWith('status: ')) status = Number(line.slice(8))
-          continue
+    try {
+      for await (const chunk of proc.stdout) {
+        const spawnErr = await Promise.race([spawnFailed, Promise.resolve(null)])
+        if (spawnErr) throw spawnErr
+        buffer += chunk.toString('utf8')
+        let nl
+        while ((nl = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, nl).replace(/\r$/, '')
+          buffer = buffer.slice(nl + 1)
+          if (status === null) {
+            if (line.startsWith('status: ')) status = Number(line.slice(8))
+            continue
+          }
+          if (status !== 200) {
+            if (line.startsWith('error: ')) errorText = line.slice(7)
+            continue
+          }
+          if (line === '[DONE]') return
+          if (line.startsWith('data:')) yield line.slice(5).trimStart()
         }
-        if (status !== 200) {
-          if (line.startsWith('error: ')) errorText = line.slice(7)
-          continue
-        }
-        if (line === '[DONE]') return
-        if (line.startsWith('data:')) yield line.slice(5).trimStart()
       }
+      if (status === null) {
+        // A cancelled request closes the pipe without a status line: report it
+        // as such instead of the vague "no status line".
+        if (aborted) throw new HttpError(0, 'request aborted')
+        throw new HttpError(0, 'bun relay produced no status line')
+      }
+      if (status !== 200) throw new HttpError(status, errorText)
+    } finally {
+      // The relay process must ALWAYS be reaped: the generator can end early
+      // (the `[DONE]` line above, an error, a cancelled request) and a
+      // surviving `bun run relay.mjs` would linger for the whole session —
+      // one leaked process per request.
+      kill()
+      // Detach the abort listener so a long-lived signal does not keep this
+      // closure (and the process reference) alive.
+      if (signal) signal.removeEventListener?.('abort', kill)
     }
-    if (status === null) throw new HttpError(0, 'bun relay produced no status line')
-    if (status !== 200) throw new HttpError(status, errorText)
   }
 
   return payloads()

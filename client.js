@@ -188,15 +188,28 @@ window.__ModuleLoader__.load({
       tagPaid: { fontSize: 10, padding: '0 5px', borderRadius: 4, background: 'rgba(127,127,127,0.16)', opacity: 0.75, flexShrink: 0 },
     }
 
-    /** Small same-origin POST to the loopback bridge. */
-    async function bridge(path, body) {
-      const res = await fetch(BRIDGE + path, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body ?? {}),
-      })
-      if (!res.ok) throw new Error(`bridge ${path} -> HTTP ${res.status}`)
-      return res.json()
+    /**
+     * Small same-origin POST to the loopback bridge.
+     *
+     * Every call is bounded: without a timeout a stalled bridge (the host
+     * restarting, the route not registered) leaves the button spinning
+     * forever and the card unusable.
+     */
+    async function bridge(path, body, timeoutMs = 30_000) {
+      const controller = new AbortController()
+      const timer = window.setTimeout(() => controller.abort(), timeoutMs)
+      try {
+        const res = await fetch(BRIDGE + path, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body ?? {}),
+          signal: controller.signal,
+        })
+        if (!res.ok) throw new Error(`bridge ${path} -> HTTP ${res.status}`)
+        return await res.json()
+      } finally {
+        window.clearTimeout(timer)
+      }
     }
 
     /**
@@ -215,7 +228,6 @@ window.__ModuleLoader__.load({
       const form = props.form ?? props.settings ?? {}
       const state = form.state ?? {}
       const value = state.value ?? {}
-      const revision = state.revision
       const modelsValue = value.models && typeof value.models === 'object' ? value.models : {}
 
       const [status, setStatus] = React.useState(null)
@@ -223,7 +235,10 @@ window.__ModuleLoader__.load({
       const [roster, setRoster] = React.useState([])
       const [results, setResults] = React.useState({})
       const [probing, setProbing] = React.useState({})
+      /** An availability probe is running (disables the probe buttons). */
       const [busy, setBusy] = React.useState(false)
+      /** A catalog refresh is running (disables the update button). */
+      const [updating, setUpdating] = React.useState(false)
       const [note, setNote] = React.useState('')
       /** Optimistic free-only value while the bridge round-trips (null = trust the bridge). */
       const [filterLocal, setFilterLocal] = React.useState(null)
@@ -261,14 +276,17 @@ window.__ModuleLoader__.load({
        * says whether the Host accepts writes, and `state.revision` is the
        * conflict token the Host validates against.
        *
+       * The revision is NOT passed: the snapshot is a frame captured at render
+       * time, so by the time a click lands it is usually one write behind and
+       * the Host would reject the whole operation with a conflict
+       * (host: `descriptor.revision !== expected -> SettingsConflictError`).
+       * Passing `undefined` lets the Host use the CURRENT revision, which is
+       * what a background action wants. The Host applies an operation list
+       * atomically, so all the fields of one action land together.
+       *
        * The bridge applies a change to the RUNNING adapter; only this path
        * makes it survive a restart, so every write goes through both: the
        * bridge first (so the UI reacts at once), then the form (so it sticks).
-       *
-       * All fields of one action are submitted as ONE operation list, because
-       * the Host applies an operation list atomically — two separate calls
-       * would each rewrite the whole entry and the second would drop the
-       * first's change.
        *
        * @param {Array<[string[], unknown]>} entries path segments + value pairs
        * @param {Array<string[]>} unsetPaths paths to delete
@@ -282,7 +300,9 @@ window.__ModuleLoader__.load({
           for (const path of unsetPaths) ops.push({ op: 'unset', path })
           if (ops.length === 0) return true
           try {
-            const accepted = await form.mutate(ops, form.state?.revision)
+            // No revision: the snapshot's revision is stale by the time the
+            // click is handled, and a stale revision is a guaranteed conflict.
+            const accepted = await form.mutate(ops, undefined)
             if (accepted === false) {
               setNote(t('saveRejected'))
               return false
@@ -453,6 +473,9 @@ window.__ModuleLoader__.load({
        * Availability test over SSE: the bridge pushes one `result` event per
        * model as soon as it settles, so rows fill in one by one instead of the
        * whole batch landing at the end.
+       *
+       * The stream is BOUNDED: a probe that never answers would otherwise
+       * leave the row spinning forever.
        */
       const runProbe = React.useCallback(
         async (ids) => {
@@ -465,11 +488,16 @@ window.__ModuleLoader__.load({
           setBusy(true)
           setNote(t('testing'))
           setProbing(Object.fromEntries(targets.map((id) => [id, true])))
+          const controller = new AbortController()
+          // Generous: the bridge probes the models SEQUENTIALLY, so a batch
+          // legitimately takes a while. This only catches a DEAD stream.
+          const timer = window.setTimeout(() => controller.abort(), 15 * 60_000)
           try {
             const res = await fetch(BRIDGE + '/probe', {
               method: 'POST',
               headers: { 'content-type': 'application/json' },
               body: JSON.stringify({ ids: targets }),
+              signal: controller.signal,
             })
             if (!res.ok || !res.body) throw new Error(`bridge /probe -> HTTP ${res.status}`)
             const reader = res.body.getReader()
@@ -514,6 +542,7 @@ window.__ModuleLoader__.load({
           } catch (err) {
             setNote(String(err?.message ?? err))
           } finally {
+            window.clearTimeout(timer)
             setBusy(false)
             setProbing({})
           }
@@ -566,7 +595,7 @@ window.__ModuleLoader__.load({
        * removed from the local draft and from the stored settings.
        */
       const updateModels = React.useCallback(async () => {
-        setBusy(true)
+        setUpdating(true)
         setNote(t('updating'))
         try {
           const payload = await bridge('/refresh', {})
@@ -599,7 +628,7 @@ window.__ModuleLoader__.load({
         } catch (err) {
           setNote(`${t('saveError')}: ${String(err?.message ?? err)}`)
         } finally {
-          setBusy(false)
+          setUpdating(false)
         }
       }, [t, draft, persist])
 
@@ -656,8 +685,8 @@ window.__ModuleLoader__.load({
           // Re-fetch the model directory from upstream, now.
           h(
             'button',
-            { style: S.button, disabled: busy, title: t('updateModelsHint'), onClick: () => void updateModels() },
-            busy ? t('updating') : t('updateModels'),
+            { style: S.button, disabled: updating, title: t('updateModelsHint'), onClick: () => void updateModels() },
+            updating ? t('updating') : t('updateModels'),
           ),
           // Bulk visibility: only the free models ticked (paid rows hidden), or
           // everything ticked again.

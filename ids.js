@@ -72,7 +72,14 @@ export function canonicalSessionID(signal) {
   return session
 }
 
-/** CLI-identical user agent (node runtime values). */
+/**
+ * The CLI-identical user agent.
+ *
+ * The gateway groups requests by TLS fingerprint AND by the client headers, so
+ * the catalog request must look like the same client as the inference one —
+ * otherwise the two land in different quota buckets. One source of truth:
+ * every upstream request uses THIS function.
+ */
 export function opencodeUserAgent() {
   return `opencode/1.18.31 (${process.platform} ${process.arch}; node${process.versions.node})`
 }
@@ -87,7 +94,6 @@ export function deriveRequestIDs(messages) {
   }
 }
 
-/** The full header set sent with every upstream request. */
 /** The full header set sent with every upstream request. */
 export function disguiseHeaders(ids) {
   return {

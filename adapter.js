@@ -43,8 +43,9 @@ export const OWN_LANE_RETRY_POLICY = Object.freeze({
 })
 
 /**
- * Token holder: resolves once; invalidation (after AUTH failure) re-resolves
- * from the running OpenCode. The token never touches disk.
+ * Token holder: resolves once; invalidation (after AUTH failure, or when the
+ * token has expired) re-resolves from the running OpenCode. The token never
+ * touches disk.
  */
 class TokenHolder {
   #resolved = null
@@ -61,8 +62,29 @@ class TokenHolder {
     return this.#resolved
   }
 
+  /**
+   * Whether the held credential is past its expiry.
+   *
+   * The credential carries an `expires` timestamp (ms since epoch). Without
+   * this check an expired token is used until the upstream answers 401 — the
+   * request is wasted and the failure is opaque. Probing the expiry first
+   * turns it into a cheap re-resolve.
+   *
+   * @param {number} [skewMs] treat a token that expires within this window as
+   *   expired, so a request never starts with a token that dies mid-flight.
+   */
+  #expired(skewMs = 30_000) {
+    const expires = this.#resolved?.expires
+    if (typeof expires !== 'number' || !Number.isFinite(expires)) return false
+    return Date.now() + skewMs >= expires
+  }
+
   resolve() {
-    if (this.#resolved) return Promise.resolve(this.#resolved)
+    if (this.#resolved && !this.#expired()) return Promise.resolve(this.#resolved)
+    if (this.#resolved && this.#expired()) {
+      this.#logger?.info?.('opencode-local: the held credential has expired; re-resolving')
+      this.#resolved = null
+    }
     if (this.#resolving) return this.#resolving
     this.#resolving = resolveLocalOpencode(this.#explicitToken, this.#logger)
       .then((value) => {
@@ -127,6 +149,18 @@ export class OpenCodeLocalAdapter {
   async warm() {
     await this.#ensureToken()
     await this.#catalog.refreshOnce()
+  }
+
+  /**
+   * Stop background work.
+   *
+   * Called when the plugin is disposed: the catalog must not start another
+   * refresh round, and the held credential is dropped (it only lives in
+   * memory).
+   */
+  stop() {
+    this.#catalog.stop()
+    this.#tokens.invalidate()
   }
 
   /**
@@ -224,20 +258,25 @@ export class OpenCodeLocalAdapter {
    * Availability test: send one tiny streaming request per model through the
    * same transport inference uses, and classify the outcome.
    *
-   * Models are probed SEQUENTIALLY and each result is handed to `onResult` as
-   * soon as it settles, so a caller can stream per-model progress instead of
-   * waiting for the whole batch.
+   * Models are probed with BOUNDED CONCURRENCY (a few at a time) and each
+   * result is handed to `onResult` as soon as it settles, so a caller can
+   * stream per-model progress instead of waiting for the whole batch.
+   *
+   * Strictly sequential probing was too slow to be usable: the card probes
+   * every free model (a dozen), and a model that hangs would have delayed
+   * the whole batch by its full timeout each time. A small worker pool keeps
+   * the batch short without hammering the account.
    *
    * @param ids model ids to probe (empty = every visible model)
    * @param onResult per-model callback (result) => void
+   * @param concurrency how many probes may run at once
    */
-  async probe(ids = [], onResult) {
+  async probe(ids = [], onResult, concurrency = 4) {
     const targets = (Array.isArray(ids) && ids.length > 0 ? ids : this.#catalog.list().map((m) => m.id)).filter(
       (id) => typeof id === 'string' && id.length > 0,
     )
     const results = []
-    for (const id of targets) {
-      const result = await this.probeOne(id)
+    const report = (result) => {
       results.push(result)
       if (typeof onResult === 'function') {
         try {
@@ -247,11 +286,27 @@ export class OpenCodeLocalAdapter {
         }
       }
     }
+    const limit = Math.max(1, Math.min(concurrency, targets.length))
+    let next = 0
+    const worker = async () => {
+      for (;;) {
+        const index = next++
+        if (index >= targets.length) return
+        report(await this.probeOne(targets[index]))
+      }
+    }
+    await Promise.all(Array.from({ length: limit }, worker))
     return results
   }
 
-  /** Probe one model and classify the outcome. */
-  async probeOne(id) {
+  /**
+   * Probe one model and classify the outcome.
+   *
+   * The probe is BOUNDED: a model that never answers must not hold the
+   * card's SSE stream open forever (the browser would wait on it, and the
+   * "probing" spinner would never clear).
+   */
+  async probeOne(id, timeoutMs = 60_000) {
     const started = Date.now()
     let ok = false
     let code = 'UNKNOWN'
@@ -266,6 +321,7 @@ export class OpenCodeLocalAdapter {
         system: 'Availability probe. Follow the instruction exactly.',
         messages: [{ role: 'user', content: [{ type: 'text', text: 'Reply with exactly: OK' }] }],
         maxTokens: 24,
+        signal: AbortSignal.timeout(timeoutMs),
       })) {
         if (chunk.type === 'text-delta') text += chunk.text
         else if (chunk.type === 'finish') {

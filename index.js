@@ -251,6 +251,9 @@ export function apply(ctx, rawConfig = {}) {
     maybeEffect.call(ctx, () => () => {
       disposed = true
       clearInterval(refreshTimer)
+      // Stop the catalog too: it must not start another refresh round after
+      // the plugin is gone.
+      adapter.stop()
       if (typeof offVolatile === 'function') offVolatile()
       const dispose = registration.handle?.dispose
       if (typeof dispose === 'function') void Promise.resolve(dispose.call(registration.handle)).catch(() => {})

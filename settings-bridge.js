@@ -18,8 +18,17 @@
 /** Bridge route prefix (same-origin, loopback-only). */
 export const SETTINGS_BRIDGE_PREFIX = '/api/opencode-local/settings'
 
-/** Cap on JSON request bodies (a probe trigger is tiny). */
-const MAX_JSON_BODY_BYTES = 16 * 1024
+/**
+ * Cap on JSON request bodies.
+ *
+ * The biggest body the bridge accepts is the per-model settings map that
+ * `filter` carries: one entry per model, so it grows with the account's
+ * catalog. At ~55 bytes per entry, 16 KB only fits ~290 models — close
+ * enough to the cap that a bigger catalog would silently fail the write.
+ * 1 MB leaves room for thousands of models and is still tiny for a
+ * loopback-only route.
+ */
+const MAX_JSON_BODY_BYTES = 1024 * 1024
 
 // -- trust --------------------------------------------------------------------
 

@@ -9,6 +9,8 @@
  * limits (context/output) and reasoning metadata where available.
  */
 
+import { opencodeUserAgent } from './ids.js'
+
 export const ZEN_BASE_URL = 'https://opencode.ai/zen'
 export const DEFAULT_CONTEXT_WINDOW = 262144
 export const DEFAULT_MAX_TOKENS = 32768
@@ -25,7 +27,7 @@ export class ModelCatalog {
   #failed = false
   #refreshSeconds
   #freeOnly
-  #timer = null
+  /** Set when the plugin disposes the catalog: no further work is started. */
   #stopped = false
   #fetchImpl
   #onRefresh
@@ -302,30 +304,15 @@ export class ModelCatalog {
     }
   }
 
-  async start() {
-    await this.refreshOnce()
-    let attempts = 0
-    while (this.list().length === 0 && attempts < 4 && !this.#stopped) {
-      attempts += 1
-      await new Promise((r) => setTimeout(r, 15_000))
-      if (this.#stopped) return
-      await this.refreshOnce()
-    }
-    if (this.#stopped) return
-    this.#timer = setInterval(() => {
-      void this.refreshOnce()
-    }, this.#refreshSeconds * 1000)
-    this.#timer.unref?.()
-  }
-
+  /**
+   * The catalog's timer is owned by the plugin entry (index.js), which also
+   * re-resolves the credential and rewrites the status file — so the catalog
+   * does NOT run a timer of its own. This method used to exist and was never
+   * called: two timers for one job is how they drift apart.
+   */
   stop() {
     this.#stopped = true
-    if (this.#timer) {
-      clearInterval(this.#timer)
-      this.#timer = null
-    }
   }
-
   /**
    * The models DSH exposes to the picker.
    *
@@ -468,7 +455,10 @@ export async function fetchZenModels(token, fetchImpl = fetch) {
   const res = await fetchImpl(`${ZEN_BASE_URL}/v1/models`, {
     headers: {
       authorization: `Bearer ${token}`,
-      'user-agent': 'opencode/1.18.31 (win32 x64; node22.0.0)',
+      // The SAME client identity the inference requests use — the gateway
+      // groups by fingerprint AND headers, so a different user-agent would
+      // put the catalog request in another quota bucket.
+      'user-agent': opencodeUserAgent(),
       'x-opencode-client': 'cli',
       accept: 'application/json',
     },

@@ -11,6 +11,9 @@
  * forwarded line-by-line on stdout, prefixed by a `status: N` header line.
  * Non-200 responses arrive as `status: N` followed by `error: <body>`.
  */
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 async function readStdin() {
   const chunks = []
   for await (const c of process.stdin) chunks.push(c)
@@ -20,8 +23,16 @@ async function readStdin() {
 async function run() {
   const req = JSON.parse(await readStdin())
   if (process.env.OPENCODE_LOCAL_DEBUG) {
+    // Debug dumps contain the Authorization header, so they must not land in
+    // a shared, guessable place: write to the OS temp dir with a private
+    // mode, and redact the bearer token.
     const { writeFileSync } = await import('node:fs')
-    writeFileSync(`D:/学习/relay-debug-${Date.now()}.json`, JSON.stringify(req, null, 2), 'utf8')
+    const safe = { ...req, headers: { ...(req.headers ?? {}) } }
+    if (typeof safe.headers.authorization === 'string') {
+      safe.headers.authorization = safe.headers.authorization.replace(/Bearer\s+\S+/i, 'Bearer <redacted>')
+    }
+    const path = join(tmpdir(), `opencode-local-relay-debug-${process.pid}-${Date.now()}.json`)
+    writeFileSync(path, JSON.stringify(safe, null, 2), { encoding: 'utf8', mode: 0o600 })
   }
   const headers = new Headers()
   for (const [k, v] of Object.entries(req.headers ?? {})) {

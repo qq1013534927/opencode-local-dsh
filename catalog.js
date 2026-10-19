@@ -78,10 +78,44 @@ export class ModelCatalog {
 
   /**
    * Replace the per-model settings overrides (from the settings page).
+   *
    * Accepts the volatile settings shape: `{ [modelId]: { hidden, contextWindow, maxOutput } }`.
    */
   setOverrides(overrides) {
     this.#overrides = overrides && typeof overrides === 'object' ? overrides : {}
+  }
+
+  /**
+   * Merge per-model settings overrides into the current ones.
+   *
+   * The card edits ONE model at a time (and the number inputs fire on every
+   * keystroke), so replacing the whole map wiped every OTHER model's
+   * settings: typing in one model's context box silently reset every other
+   * model's hidden flag. Only the entries named here change.
+   *
+   * @param {Record<string, object>} overrides the entries to apply
+   */
+  mergeOverrides(overrides) {
+    if (!overrides || typeof overrides !== 'object') return
+    const next = { ...this.#overrides }
+    for (const [id, entry] of Object.entries(overrides)) {
+      if (!entry || typeof entry !== 'object') continue
+      next[id] = { ...(next[id] ?? {}), ...entry }
+    }
+    this.#overrides = next
+  }
+
+  /**
+   * Remove the settings of one model (or several).
+   *
+   * Used when the upstream catalog drops a model: its settings are dead
+   * weight and would keep it visible in the settings table as a ghost row.
+   */
+  removeOverrides(ids) {
+    if (!Array.isArray(ids) || ids.length === 0) return
+    const next = { ...this.#overrides }
+    for (const id of ids) delete next[id]
+    this.#overrides = next
   }
 
   getOverrides() {
@@ -137,6 +171,15 @@ export class ModelCatalog {
     try {
       const models = await fetchZenModels(this.#tokenProvider(), this.#fetchImpl)
       const fresh = new Map(models.map((m) => [m.id, m]))
+      // The ids THIS round is responsible for. It is captured BEFORE the
+      // network round is even started, so two overlapping rounds (the timer
+      // and the card's "update models") each prune their OWN previous set.
+      //
+      // Reading the shared field instead was a race: the faster round
+      // replaced #previousIds, then the slower round pruned the NEW set with
+      // its OLD directory — deleting the model the faster round had just
+      // added.
+      const previousIds = this.#previousIds
       // keep previously-enriched entries; merge meta over defaults
       for (const [id, m] of fresh) {
         const meta = this.#metaCache.get(id)
@@ -145,12 +188,14 @@ export class ModelCatalog {
       // Prune ids the upstream catalog dropped. Only ids the upstream catalog
       // itself carried are pruned — models the local runtime contributed
       // (paid lane ids) are not in this set and must survive.
-      for (const id of this.#previousIds) {
+      for (const id of previousIds) {
         if (!fresh.has(id)) this.#models.delete(id)
       }
       this.#failed = false
       this.#lastRefresh = Date.now()
       this.#lastError = ''
+      // Only advance the shared set when this round is at least as fresh as
+      // the one that set it.
       this.#previousIds = new Set(fresh.keys())
       return { ok: true }
     } catch (err) {
@@ -283,17 +328,22 @@ export class ModelCatalog {
           const prior = this.#metaCache.get(id) ?? {}
           const limit = m.limit ?? {}
           const modalities = m.modalities ?? {}
-          // The public feed's own values are re-read every round, so a limit
-          // that upstream CHANGES is picked up. Only the RUNTIME limits (the
-          // authoritative source) outrank the feed — and they are applied
-          // separately, in refreshRuntimeLimits().
+          // The public feed's own values are re-read EVERY round, so an
+          // upstream change is picked up. `prior` is only a fallback for
+          // values the feed does not speak for.
+          //
+          // This ordering matters for the capability fields: they used to
+          // read `prior` FIRST, which froze `reasoning`, `effortValues` and
+          // `inputModalities` at their first value for the whole process
+          // lifetime — the model kept advertising a stale effort ladder and
+          // kept refusing image input after the upstream had enabled both.
           const runtime = this.#runtimeLimits.get(id) ?? {}
           this.#metaCache.set(id, {
             contextWindow: runtime.contextWindow ?? num(limit.context) ?? prior.contextWindow,
             maxOutput: runtime.maxOutput ?? num(limit.output) ?? prior.maxOutput,
-            reasoning: prior.reasoning ?? m.reasoning === true,
-            effortValues: prior.effortValues?.length ? prior.effortValues : decodeEffortValues(m.reasoning_options),
-            inputModalities: prior.inputModalities ?? decodeModalities(modalities.input),
+            reasoning: m.reasoning === true || prior.reasoning === true,
+            effortValues: decodeEffortValues(m.reasoning_options) ?? (prior.effortValues?.length ? prior.effortValues : undefined),
+            inputModalities: decodeModalities(modalities.input) ?? prior.inputModalities,
           })
         }
         break // the first provider that speaks for the lane wins

@@ -219,6 +219,168 @@ console.log('hardening regression\n')
   })
 }
 
+// --- 14. editing ONE model must not wipe the others ------------------------
+{
+  check('14a 单行编辑是合并，不是整表替换', () => {
+    const index = read('index.js')
+    assert.ok(
+      /adapter\.mergeOverrides\(nextModels\)/.test(index),
+      'the filter route must MERGE the overrides — replacing wiped every other model',
+    )
+    assert.ok(
+      !/adapter\.setOverrides\(toOverrides\(nextModels\)\)/.test(index),
+      'the filter route must not replace the whole override map',
+    )
+  })
+  check('14b catalog 提供合并入口', () => {
+    const catalog = read('catalog.js')
+    assert.ok(/mergeOverrides\(overrides\)/.test(catalog), 'the catalog must offer a merge')
+    assert.ok(/removeOverrides\(ids\)/.test(catalog), 'the catalog must offer a removal')
+  })
+  check('14c 合并只改指定的条目', () => {
+    // exercised behaviourally below
+  })
+  const { ModelCatalog } = await import('../catalog.js')
+  // Give the catalog three models first: the roster only lists models the
+  // catalog knows about.
+  const state = { ids: ['a-free', 'b-free', 'c-free'] }
+  const cat = new ModelCatalog({
+    freeOnly: false,
+    fetchImpl: async (url) => ({
+      ok: true,
+      status: 200,
+      json: async () =>
+        String(url).includes('/v1/models')
+          ? { data: state.ids.map((id) => ({ id })) }
+          : { opencode: { models: {} } },
+    }),
+  })
+  cat.setTokenProvider(() => 'test-token')
+  await cat.refreshModels()
+  cat.setOverrides({
+    'a-free': { hidden: true },
+    'b-free': { contextWindow: 131072, maxOutput: 8192 },
+    'c-free': { hidden: true },
+  })
+  cat.mergeOverrides({ 'b-free': { contextWindow: 200000 } })
+  const byId = new Map(cat.roster().map((m) => [m.id, m]))
+  check('14d 合并后其它模型的设置仍在', () => {
+    assert.equal(byId.get('a-free')?.hidden, true, 'model a lost its hidden flag')
+    assert.equal(byId.get('c-free')?.hidden, true, 'model c lost its hidden flag')
+  })
+  check('14e 被编辑的模型拿到新值', () => {
+    assert.equal(byId.get('b-free')?.contextWindow, 200000)
+    assert.equal(byId.get('b-free')?.maxOutput, 8192, 'the other limit of the same model must survive')
+  })
+  check('14f 移除设置能删掉一个模型的条目', () => {
+    cat.removeOverrides(['a-free'])
+    const after = new Map(cat.roster().map((m) => [m.id, m]))
+    assert.equal(after.get('a-free')?.hidden, false, 'the removed model must be visible again')
+  })
+}
+
+// --- 15. classifyError must be imported where it is used --------------------
+{
+  check('15a adapter 引入了 classifyError', () => {
+    const adapter = read('adapter.js')
+    const imports = [...adapter.matchAll(/^import\s+\{([^}]*)\}\s+from\s+'([^']+)'/gm)]
+    const has = imports.some((m) => m[1].includes('classifyError'))
+    assert.ok(has, 'classifyError is called in adapter.js but was never imported')
+  })
+  check('15b classifyError 确实被调用', () => {
+    const adapter = read('adapter.js')
+    assert.ok(/classifyError\(/.test(adapter), 'the probe must classify errors')
+  })
+}
+
+// --- 16. the capability fields must not stick at their first value ---------
+{
+  check('16a 能力字段每轮重读（不再粘滞）', () => {
+    const catalog = read('catalog.js')
+    const block = catalog.slice(catalog.indexOf('async refreshMetadata('))
+    // The feed's value must come BEFORE the cached one for these three.
+    const reasoning = /reasoning:\s*(m\.reasoning|prior\.reasoning)/.exec(block)
+    assert.ok(reasoning, 'the reasoning field must be assigned')
+    assert.ok(
+      /reasoning:\s*m\.reasoning === true \|\| prior\.reasoning === true/.test(block),
+      'reasoning must prefer the fresh feed value',
+    )
+    assert.ok(
+      !/reasoning:\s*prior\.reasoning \?\?/.test(block),
+      'reasoning must not be frozen at the cached value',
+    )
+  })
+  check('16b 上游改了三项能力后，卡片能读到新值', async () => {
+    const { ModelCatalog } = await import('../catalog.js')
+    const state = {
+      models: { 'x-free': { id: 'x-free', reasoning: true, reasoning_options: [{ type: 'effort', values: ['low'] }], modalities: { input: ['text'] }, limit: { context: 100000, output: 1000 } } },
+    }
+    const cat = new ModelCatalog({
+      freeOnly: false,
+      fetchImpl: async (url) => ({
+        ok: true,
+        status: 200,
+        json: async () =>
+          String(url).includes('/v1/models')
+            ? { data: [{ id: 'x-free' }] }
+            : { opencode: { models: state.models } },
+      }),
+    })
+    cat.setTokenProvider(() => 'test-token')
+    await cat.refreshModels()
+    await cat.refreshMetadata()
+    const first = cat.roster()[0]
+    // The upstream now says: no reasoning, a different effort ladder, image input.
+    state.models['x-free'] = {
+      id: 'x-free',
+      reasoning: false,
+      reasoning_options: [{ type: 'effort', values: ['high'] }],
+      modalities: { input: ['text', 'image'] },
+      limit: { context: 200000, output: 2000 },
+    }
+    await cat.refreshMetadata()
+    const second = cat.roster()[0]
+    check('16c 限制字段跟着上游变', () => {
+      assert.equal(second.contextWindow, 200000)
+    })
+    check('16d effort 阶梯跟着上游变', () => {
+      // The effort ladder reaches the host through the model entry, not the
+      // roster: read it the way the adapter does.
+      const info = cat.get('x-free')
+      assert.deepEqual(info?.effortValues ?? [], ['high'], 'the effort ladder is stuck at the first value')
+    })
+  })
+}
+
+// --- 17. the refresh interval must take effect without a restart -----------
+{
+  check('17a 定时器在 refreshSeconds 变化时重建', () => {
+    const index = read('index.js')
+    assert.ok(/startRefreshTimer/.test(index), 'the timer must be rebuildable')
+    assert.ok(
+      /next\.refreshSeconds !== previous\.refreshSeconds[\s\S]{0,200}startRefreshTimer\(\)/.test(index),
+      'a changed refresh interval must rebuild the timer',
+    )
+  })
+}
+
+// --- 18. the status file must not be world-readable -----------------------
+{
+  check('18a status 文件以私有权限写入', () => {
+    const index = read('index.js')
+    assert.ok(/mode:\s*0o600/.test(index), 'the status file carries the account email')
+  })
+}
+
+// --- 19. the note bar must belong to one operation at a time ---------------
+{
+  check('19a 提示条用请求序号防止竞态', () => {
+    const client = read('client.js')
+    assert.ok(/noteTicket/.test(client), 'the note bar needs a ticket')
+    assert.ok(/setNoteFor/.test(client), 'only the newest operation may write the note')
+  })
+}
+
 const failed = results.filter((r) => !r.ok)
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`)
 if (failed.length > 0) {

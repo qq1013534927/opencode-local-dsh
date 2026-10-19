@@ -245,6 +245,20 @@ window.__ModuleLoader__.load({
       // Local draft of the per-model map; committed through mutate on change.
       const [draft, setDraft] = React.useState(modelsValue)
 
+      /**
+       * The note bar belongs to ONE operation at a time.
+       *
+       * Several independent flows write it (a per-keystroke model edit, the
+       * probe stream, the catalog refresh) and their answers can arrive out
+       * of order — the last response to land used to decide the text, so the
+       * bar flickered and named the wrong operation. Every flow now takes a
+       * ticket and only the newest one may write.
+       */
+      const noteTicket = React.useRef(0)
+      const setNoteFor = React.useCallback((ticket, text) => {
+        if (ticket === noteTicket.current) setNote(text)
+      }, [])
+
       React.useEffect(() => {
         setDraft(modelsValue)
       }, [JSON.stringify(modelsValue)])
@@ -486,6 +500,7 @@ window.__ModuleLoader__.load({
               ? ids
               : ordered.filter((m) => m.free === true || isFree(m.id)).map((m) => m.id)
           setBusy(true)
+          const ticket = ++noteTicket.current
           setNote(t('testing'))
           setProbing(Object.fromEntries(targets.map((id) => [id, true])))
           const controller = new AbortController()
@@ -532,15 +547,15 @@ window.__ModuleLoader__.load({
                       return next
                     })
                   } else if (event === 'done') {
-                    setNote('')
+                    setNoteFor(ticket, '')
                   } else if (event === 'failed') {
-                    setNote(String(payload?.message ?? 'probe failed'))
+                    setNoteFor(ticket, String(payload?.message ?? 'probe failed'))
                   }
                 }
               }
             }
           } catch (err) {
-            setNote(String(err?.message ?? err))
+            setNoteFor(ticket, String(err?.message ?? err))
           } finally {
             window.clearTimeout(timer)
             setBusy(false)
@@ -596,6 +611,7 @@ window.__ModuleLoader__.load({
        */
       const updateModels = React.useCallback(async () => {
         setUpdating(true)
+        const ticket = ++noteTicket.current
         setNote(t('updating'))
         try {
           const payload = await bridge('/refresh', {})
@@ -624,13 +640,13 @@ window.__ModuleLoader__.load({
             // they do not come back on the next start.
             await persist([], stale.map((id) => ['models', id]))
           }
-          setNote(parts.length > 0 ? parts.join(' · ') : t('updated'))
+          setNoteFor(ticket, parts.length > 0 ? parts.join(' · ') : t('updated'))
         } catch (err) {
-          setNote(`${t('saveError')}: ${String(err?.message ?? err)}`)
+          setNoteFor(ticket, `${t('saveError')}: ${String(err?.message ?? err)}`)
         } finally {
           setUpdating(false)
         }
-      }, [t, draft, persist])
+      }, [t, draft, persist, setNoteFor])
 
       /**
        * One-click free-only filter.
@@ -649,6 +665,7 @@ window.__ModuleLoader__.load({
        */
       const setFreeOnlyFilter = async (next) => {
         setFilterLocal(next)
+        const ticket = ++noteTicket.current
         setNote(t('saving'))
         try {
           const payload = await bridge('/filter', { freeOnly: next })
@@ -658,10 +675,10 @@ window.__ModuleLoader__.load({
           setStatus(payload.value)
           setRoster(Array.isArray(payload.value.models) ? payload.value.models : [])
           setFilterLocal(null)
-          setNote(next ? t('freeOnlyOn') : t('freeOnlyOff'))
+          setNoteFor(ticket, next ? t('freeOnlyOn') : t('freeOnlyOff'))
         } catch (err) {
           setFilterLocal(null)
-          setNote(`${t('saveError')}: ${String(err?.message ?? err)}`)
+          setNoteFor(ticket, `${t('saveError')}: ${String(err?.message ?? err)}`)
           // Re-sync with whatever the adapter really holds.
           void loadStatus()
           return

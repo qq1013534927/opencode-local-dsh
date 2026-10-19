@@ -111,10 +111,12 @@ export function apply(ctx, rawConfig = {}) {
     void (async () => {
       try {
         await mkdir(dataDir, { recursive: true })
+        // The file carries the ACCOUNT EMAIL, so it must not be readable by
+        // anyone but the owner: create it with a private mode.
         await writeFile(
           statusPath,
           JSON.stringify({ ...adapter.status(), writtenAt: new Date().toISOString() }, null, 2),
-          'utf8',
+          { encoding: 'utf8', mode: 0o600 },
         )
       } catch {
         /* status is best-effort */
@@ -138,14 +140,26 @@ export function apply(ctx, rawConfig = {}) {
       logger.error(`opencode-local: failed to resolve the running OpenCode: ${err instanceof Error ? err.message : String(err)}`)
     })
 
-  const refreshTimer = setInterval(() => {
-    if (disposed) return
-    void adapter
-      .warm()
-      .then(() => writeStatus())
-      .catch(() => {})
-  }, Math.max(30, settings.refreshSeconds) * 1000)
-  refreshTimer.unref?.()
+  /**
+   * The background refresh timer.
+   *
+   * It is REBUILT when `refreshSeconds` changes: the interval's delay was
+   * fixed at apply() time, so editing the setting had no effect until DSH
+   * was restarted.
+   */
+  let refreshTimer = null
+  const startRefreshTimer = () => {
+    if (refreshTimer) clearInterval(refreshTimer)
+    refreshTimer = setInterval(() => {
+      if (disposed) return
+      void adapter
+        .warm()
+        .then(() => writeStatus())
+        .catch(() => {})
+    }, Math.max(30, settings.refreshSeconds) * 1000)
+    refreshTimer.unref?.()
+  }
+  startRefreshTimer()
 
   // ---- settings bridge (loopback-only) ------------------------------------
   // The card needs the LIVE roster and an on-demand availability probe, which
@@ -212,7 +226,14 @@ export function apply(ctx, rawConfig = {}) {
         const nextFreeOnly = typeof body.freeOnly === 'boolean' ? body.freeOnly : undefined
         const nextModels = body.models && typeof body.models === 'object' ? body.models : undefined
         if (nextFreeOnly !== undefined) adapter.setFreeOnly(nextFreeOnly)
-        if (nextModels !== undefined) adapter.setOverrides(toOverrides(nextModels))
+        if (nextModels !== undefined) {
+          // MERGE, not replace: the card edits one model at a time (the
+          // context/output inputs fire on every keystroke), so replacing the
+          // whole map wiped every OTHER model's settings — typing in one
+          // model's context box silently reset every other model's hidden
+          // flag, and the live adapter diverged from the stored settings.
+          adapter.mergeOverrides(nextModels)
+        }
         if (body.persist === true) {
           void saveSettings({ freeOnly: nextFreeOnly, models: nextModels })
         }
@@ -232,10 +253,17 @@ export function apply(ctx, rawConfig = {}) {
   // without a plugin reload (the Loader announces volatile updates).
   const onVolatileUpdate = () => {
     if (disposed) return
+    const previous = settings
     const next = readSettings(rawConfig)
     settings = next
     adapter.setOverrides(toOverrides(next.models))
     adapter.setFreeOnly(next.freeOnly === true)
+    // A changed refresh interval only takes effect on a NEW timer: the old
+    // one was created with the previous delay.
+    if (next.refreshSeconds !== previous.refreshSeconds) {
+      startRefreshTimer()
+      logger.info(`opencode-local: refresh interval is now ${next.refreshSeconds}s`)
+    }
     void adapter
       .warm()
       .then(() => {

@@ -151,6 +151,15 @@ to the running adapter and only then persists them through the official
 settings transport (when the host serves a writable form). A click therefore
 always takes effect, even when that form cannot be written.
 
+The bridge is also usable from a script (it is loopback-only and needs no
+token). `POST /api/opencode-local/settings/filter` with
+`{"freeOnly": true, "persist": true}` applies the change to the running
+adapter **and** stores it in the profile, so it survives a restart. Without
+`persist` the change only moves the live adapter — which is what the card
+wants, because the card persists through the official transport itself (that
+path applies an operation list atomically; two separate mutations of the same
+entry race and the later one drops the earlier half).
+
 ## Prerequisites
 
 - **OpenCode client logged in once** (desktop app or `opencode serve`).

@@ -276,7 +276,13 @@ function bunRelay(request, signal) {
         // A cancelled request closes the pipe without a status line: report it
         // as such instead of the vague "no status line".
         if (aborted) throw new HttpError(0, 'request aborted')
-        throw new HttpError(0, 'bun relay produced no status line')
+        // The relay produced NOTHING: bun is present but unusable (it died, it
+        // could not run the script, the TLS stack is broken). That must be
+        // reported as BUN_UNAVAILABLE so the caller falls back to the Node
+        // transport instead of failing the request outright.
+        const err = new HttpError(0, 'bun relay produced no status line')
+        err.code = 'BUN_UNAVAILABLE'
+        throw err
       }
       if (status !== 200) throw new HttpError(status, errorText)
     } finally {
@@ -368,6 +374,18 @@ export async function* streamChat(options, token) {
     payloads = await nodeDirect(request, options.signal)
   }
 
+  // The relay is a GENERATOR, so its body only runs at the first iteration:
+  // a bun that is present but UNUSABLE fails INSIDE the loop, not at the
+  // call that created it. The old code only caught failures around that
+  // call, so the request failed outright instead of falling back to Node.
+  //
+  // Priming the generator here surfaces that failure while the Node
+  // transport is still an option. The primed payload is replayed below, so
+  // nothing is lost. The priming happens INSIDE the main try/catch: an
+  // upstream error (a 403, a 429) must still be reported as a stream error
+  // rather than escaping as an exception.
+  let primed = null
+  let source = payloads
   let textIndex = 0
   let reasoningIndex = 1
   const toolIndices = new Map()
@@ -380,7 +398,22 @@ export async function* streamChat(options, token) {
   const openTools = new Map()
 
   try {
-    for await (const payload of payloads) {
+    try {
+      primed = await payloads.next()
+    } catch (err) {
+      if (err?.code !== 'BUN_UNAVAILABLE') throw err
+      source = await nodeDirect(request, options.signal)
+      primed = null
+    }
+    if (primed && primed.done) primed = null
+    if (primed) {
+      source = (async function* replay() {
+        yield primed.value
+        for await (const p of payloads) yield p
+      })()
+    }
+
+    for await (const payload of source) {
       if (payload === '[DONE]') break
       let obj
       try {
@@ -428,12 +461,22 @@ export async function* streamChat(options, token) {
           const fn = call.function ?? {}
           const name = typeof fn.name === 'string' ? fn.name : ''
           const argsDelta = typeof fn.arguments === 'string' ? fn.arguments : ''
-          let index = toolIndices.get(id)
-          if (index === undefined && id) {
+          // Some gateways stream tool calls WITHOUT an id (index only). The
+          // old code keyed the block by id, so such a call got index
+          // `undefined` and was SILENTLY DROPPED — the model asked for a
+          // tool, the host never saw it, and the stream still ended with
+          // finish_reason "tool_calls".
+          //
+          // Fall back to the upstream's own `index` when there is no id.
+          const upstreamIndex = typeof call.index === 'number' ? call.index : undefined
+          const key = id !== '' ? id : upstreamIndex !== undefined ? `idx:${upstreamIndex}` : ''
+          let index = key === '' ? undefined : toolIndices.get(key)
+          if (index === undefined) {
             index = nextToolIndex
             nextToolIndex += 1
-            toolIndices.set(id, index)
-            openTools.set(index, { id, name, args: '' })
+            if (key !== '') toolIndices.set(key, index)
+            const blockId = id !== '' ? id : `call_${index}`
+            openTools.set(index, { id: blockId, name, args: '' })
             yield { type: 'block-start', index, blockType: 'tool-call' }
           }
           if (index !== undefined) {

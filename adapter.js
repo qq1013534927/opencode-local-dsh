@@ -8,7 +8,11 @@
  */
 
 import { ModelCatalog, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './catalog.js'
-import { streamChat } from './wire.js'
+// classifyError is used by probeOne's catch block. It was NEVER imported here,
+// so a ReferenceError was thrown INSIDE that catch — it escaped probeOne,
+// escaped the probe loop, and aborted the whole batch plus the SSE route:
+// one failing model killed the entire availability test.
+import { streamChat, classifyError } from './wire.js'
 import { resolveLocalOpencode } from './credential.js'
 
 export const PROVIDER_ID = 'opencode-local'
@@ -219,6 +223,22 @@ export class OpenCodeLocalAdapter {
   /** Apply settings overrides (visibility + context/output limits) live. */
   setOverrides(overrides) {
     this.#catalog.setOverrides(overrides)
+  }
+
+  /**
+   * Merge settings overrides into the live ones (one model at a time).
+   *
+   * The card edits ONE model at a time — and the context/output inputs fire on
+   * every keystroke — so replacing the whole map wiped every OTHER model's
+   * settings. Only the named entries change here.
+   */
+  mergeOverrides(overrides) {
+    this.#catalog.mergeOverrides(overrides)
+  }
+
+  /** Drop the settings of models the catalog no longer carries. */
+  removeOverrides(ids) {
+    this.#catalog.removeOverrides(ids)
   }
 
   /**

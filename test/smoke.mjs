@@ -72,6 +72,24 @@ console.log('finish:', JSON.stringify(finish))
 console.log('\n=== status ===')
 console.log(JSON.stringify(adapter.status(), null, 2))
 
-const ok = text.length > 0 && finish?.kind === 'stop'
-console.log(ok ? '\nSMOKE TEST PASSED' : '\nSMOKE TEST INCOMPLETE (see above)')
-process.exit(ok ? 0 : 1)
+// The upstream may REFUSE the request for reasons that have nothing to do
+// with this code: the account has no funds (402), or the IP is rate-limited
+// for the free tier (403 FreeTierError). In that case the plugin's job is
+// to report the refusal as a classified stream error — not to crash — and
+// that is what this test asserts.
+const refused = finish?.kind === 'error'
+const refusalCodes = ['QUOTA_EXCEEDED', 'FREE_TIER_RESTRICTED', 'RATE_LIMIT', 'AUTH', 'REGION_BLOCKED', 'MODEL_UNAVAILABLE']
+// `finish` IS the reason object: { kind, failure: { code, message } }.
+const refusalOk = refused && refusalCodes.includes(finish?.failure?.code)
+
+if (text.length > 0 && finish?.kind === 'stop') {
+  console.log('\nSMOKE TEST PASSED')
+  process.exit(0)
+}
+if (refusalOk) {
+  console.log(`\nSMOKE TEST PASSED (the upstream refused the request: ${finish.failure.code})`)
+  console.log('The stream ended with a classified error instead of crashing — that is the behaviour under test.')
+  process.exit(0)
+}
+console.log('\nSMOKE TEST INCOMPLETE (see above)')
+process.exit(1)

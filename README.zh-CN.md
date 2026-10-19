@@ -101,6 +101,14 @@ opencode-local-dsh/
 └── test/           # 开发测试（probe-one.mjs / smoke.mjs）
 ```
 
+## 致谢
+
+- [**opencode2dsh**](https://github.com/FishBottle7/opencode2dsh)（[FishBottle7](https://github.com/FishBottle7)）—— OpenCode Zen 的参考 DSH 集成；本插件沿用其 adapter 形态，但把匿名共享通道替换为你自己账号的通道。
+- [**opencode2api**](https://github.com/jasonxu114514/opencode2api)（[@jasonxu114514](https://github.com/jasonxu114514)）—— `legacy/agent` 里的旧版 Go sidecar 是其匿名通道实现的移植版，目录回退链与请求伪装细节同样源自它。本项目站在它的肩膀上。
+- [OpenCode](https://opencode.ai) —— 运营免费匿名 Zen 通道。
+- [@earendil-works/pi-ai](https://www.npmjs.com/package/@earendil-works/pi-ai) —— adapter 模式使用的线层协议。
+- [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 与 [dsh-market](https://github.com/dsh-market/dsh-market) 社区。
+
 ## 许可
 
 MIT

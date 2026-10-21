@@ -321,13 +321,21 @@ export function apply(ctx, rawConfig = {}) {
 
   // Re-read the live settings on every save so the card's edits take effect
   // without a plugin reload (the Loader announces volatile updates).
+  //
+  // The bridge applies a change to the RUNNING adapter first and persists it
+  // second, so an announcement can arrive for a revision that predates the
+  // write the user just made. Re-asserting every field unconditionally then
+  // stomps the fresh in-memory state with the older stored value, the card
+  // reads the stomped value back, and the switch visibly bounces (six
+  // oscillations were observed from one click). Only fields whose STORED value
+  // actually changed are applied, which leaves bridge-applied state alone.
   const onVolatileUpdate = () => {
     if (disposed) return
     const previous = settings
     const next = readSettings(rawConfig)
     settings = next
-    adapter.setOverrides(toOverrides(next.models))
-    adapter.setFreeOnly(next.freeOnly === true)
+    if (next.models !== previous.models) adapter.setOverrides(toOverrides(next.models))
+    if (next.freeOnly !== previous.freeOnly) adapter.setFreeOnly(next.freeOnly === true)
     // A changed refresh interval only takes effect on a NEW timer: the old
     // one was created with the previous delay.
     if (next.refreshSeconds !== previous.refreshSeconds) {
@@ -338,7 +346,7 @@ export function apply(ctx, rawConfig = {}) {
       .warm()
       .then(() => {
         writeStatus()
-        logger.info(`opencode-local: settings applied (freeOnly=${next.freeOnly === true})`)
+        logger.info(`opencode-local: settings applied (freeOnly=${adapter.status().freeOnly})`)
       })
       .catch(() => {})
   }

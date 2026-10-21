@@ -1,6 +1,6 @@
 {
   "name": "@local/opencode-local",
-  "version": "0.4.9",
+  "version": "0.4.10",
   "private": true,
   "description": "Route DSH model calls through your own OpenCode account's Zen models - never the shared anonymous lane.",
   "type": "module",

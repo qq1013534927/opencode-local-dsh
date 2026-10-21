@@ -281,6 +281,12 @@ window.__ModuleLoader__.load({
       const [ipBlock, setIpBlock] = React.useState(null)
       /** Optimistic free-only value while the bridge round-trips (null = trust the bridge). */
       const [filterLocal, setFilterLocal] = React.useState(null)
+      /**
+       * True while a filter write is in flight. The checkbox is disabled then,
+       * so a burst of clicks cannot queue opposite requests and leave the box
+       * flickering between them.
+       */
+      const [filterPending, setFilterPending] = React.useState(false)
       // Local draft of the per-model map; committed through mutate on change.
       const [draft, setDraft] = React.useState(modelsValue)
 
@@ -719,6 +725,10 @@ window.__ModuleLoader__.load({
        * explicitly labelled bulk button's job.
        */
       const setFreeOnlyFilter = async (next) => {
+        // One write at a time: a second request queued behind the first would
+        // carry the opposite intent and fight it.
+        if (filterPending) return
+        setFilterPending(true)
         setFilterLocal(next)
         const ticket = ++noteTicket.current
         setNote(t('saving'))
@@ -737,6 +747,8 @@ window.__ModuleLoader__.load({
           // Re-sync with whatever the adapter really holds.
           void loadStatus()
           return
+        } finally {
+          setFilterPending(false)
         }
         // Persist through the official settings transport when it is writable.
         // This is what makes the choice survive a restart; the bridge above
@@ -794,7 +806,7 @@ window.__ModuleLoader__.load({
           // Which build of this card the browser actually loaded. A stale
           // client bundle is invisible otherwise: the folder holds the new file
           // while the page keeps running the module it fetched at load time.
-          h('span', { style: { ...S.muted, opacity: 0.5 } }, 'card v0.4.9'),
+          h('span', { style: { ...S.muted, opacity: 0.5 } }, 'card v0.4.10'),
           lastRefreshText ? h('span', { style: S.muted }, `· ${t('lastRefresh')}: ${lastRefreshText}`) : null,
           h('button', { style: S.button, onClick: () => void loadStatus() }, t('refresh')),
           // Re-fetch the model directory from upstream, now.
@@ -824,13 +836,20 @@ window.__ModuleLoader__.load({
             },
             busy ? t('testing') : t('testAll'),
           ),
-          // One-click free-only filter (checked on a fresh install).
+          // One-click free-only filter.
+          //
+          // NOT wrapped in a <label>: a label forwards its own click to the
+          // nested input, and with a controlled checkbox React has already
+          // restored the DOM value by then, so one physical click fired TWO
+          // onClicks in opposite directions (the switch visibly bounced six
+          // times from one click). Only the box itself is interactive.
           h(
-            'label',
-            { style: { ...S.row, gap: 6, cursor: 'pointer' }, title: t('freeOnlyHint') },
+            'span',
+            { style: { ...S.row, gap: 6 }, title: t('freeOnlyHint') },
             h('input', {
               type: 'checkbox',
               checked: freeOnlyValue,
+              disabled: filterPending,
               onChange: (e) => void setFreeOnlyFilter(e.target.checked),
             }),
             h('span', { style: S.muted }, t('freeOnly')),

@@ -791,6 +791,10 @@ window.__ModuleLoader__.load({
           'div',
           { style: S.row },
           h('span', { style: S.muted }, `${t('status')}: ${statusLine}`),
+          // Which build of this card the browser actually loaded. A stale
+          // client bundle is invisible otherwise: the folder holds the new file
+          // while the page keeps running the module it fetched at load time.
+          h('span', { style: { ...S.muted, opacity: 0.5 } }, 'card v0.4.9'),
           lastRefreshText ? h('span', { style: S.muted }, `· ${t('lastRefresh')}: ${lastRefreshText}`) : null,
           h('button', { style: S.button, onClick: () => void loadStatus() }, t('refresh')),
           // Re-fetch the model directory from upstream, now.

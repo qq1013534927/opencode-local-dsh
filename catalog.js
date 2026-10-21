@@ -260,8 +260,8 @@ export class ModelCatalog {
         if (typeof effort === 'string' && !effortValues.includes(effort)) effortValues.push(effort)
       }
       const meta = {
-        contextWindow: num(limit.context),
-        maxOutput: num(limit.output),
+        contextWindow: posLimit(limit.context),
+        maxOutput: posLimit(limit.output),
         reasoning: Array.isArray(row.variants) && row.variants.length > 0,
         effortValues,
         inputModalities: decodeModalities(capabilities.input),
@@ -284,8 +284,8 @@ export class ModelCatalog {
         // An opencode-lane model the Zen free list did not carry (a paid id).
         this.#models.set(modelId, {
           id: modelId,
-          contextWindow: meta.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
-          maxOutput: meta.maxOutput ?? DEFAULT_MAX_TOKENS,
+          contextWindow: posLimit(meta.contextWindow) ?? DEFAULT_CONTEXT_WINDOW,
+          maxOutput: posLimit(meta.maxOutput) ?? DEFAULT_MAX_TOKENS,
           reasoning: meta.reasoning === true,
           effortValues: meta.effortValues ?? [],
           inputModalities: meta.inputModalities ?? ['text'],
@@ -339,8 +339,8 @@ export class ModelCatalog {
           // kept refusing image input after the upstream had enabled both.
           const runtime = this.#runtimeLimits.get(id) ?? {}
           this.#metaCache.set(id, {
-            contextWindow: runtime.contextWindow ?? num(limit.context) ?? prior.contextWindow,
-            maxOutput: runtime.maxOutput ?? num(limit.output) ?? prior.maxOutput,
+            contextWindow: posLimit(runtime.contextWindow) ?? posLimit(limit.context) ?? prior.contextWindow,
+            maxOutput: posLimit(runtime.maxOutput) ?? posLimit(limit.output) ?? prior.maxOutput,
             reasoning: m.reasoning === true || prior.reasoning === true,
             effortValues: decodeEffortValues(m.reasoning_options) ?? (prior.effortValues?.length ? prior.effortValues : undefined),
             inputModalities: decodeModalities(modalities.input) ?? prior.inputModalities,
@@ -391,8 +391,8 @@ export class ModelCatalog {
   /** Fold the settings override into a catalog entry (limits win over metadata). */
   #applyOverride(m) {
     const override = this.#overrideFor(m.id)
-    const contextWindow = num(override.contextWindow) ?? m.contextWindow
-    const maxOutput = num(override.maxOutput) ?? m.maxOutput
+    const contextWindow = posLimit(override.contextWindow) ?? m.contextWindow
+    const maxOutput = posLimit(override.maxOutput) ?? m.maxOutput
     if (contextWindow === m.contextWindow && maxOutput === m.maxOutput) return m
     return { ...m, contextWindow, maxOutput }
   }
@@ -417,8 +417,8 @@ export class ModelCatalog {
         free: isFreeId(m.id),
         contextWindow: effective.contextWindow,
         maxOutput: effective.maxOutput,
-        contextWindowOverridden: num(override.contextWindow) !== undefined,
-        maxOutputOverridden: num(override.maxOutput) !== undefined,
+        contextWindowOverridden: posLimit(override.contextWindow) !== undefined,
+        maxOutputOverridden: posLimit(override.maxOutput) !== undefined,
         reasoning: effective.reasoning === true,
       })
     }
@@ -464,6 +464,22 @@ function pickPresent(meta) {
 
 function num(v) {
   return typeof v === 'number' && Number.isFinite(v) ? v : undefined
+}
+
+/**
+ * A limit that is actually usable: a positive integer, else `undefined`.
+ *
+ * `num(0)` is `0`, and `0 ?? fallback` is `0` — so an upstream that reports
+ * `limit.context: 0`, or a settings override left at 0, used to propagate a
+ * ZERO context window all the way to the host. The host rejects that with
+ * `adapter returned invalid context metadata`, and one bad model takes the
+ * whole provider's model list down. Zero means "not specified" here.
+ */
+function posLimit(v) {
+  const n = num(typeof v === 'string' && v.trim() !== '' ? Number(v) : v)
+  if (n === undefined) return undefined
+  const i = Math.trunc(n)
+  return i > 0 ? i : undefined
 }
 
 /**

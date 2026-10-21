@@ -17,7 +17,9 @@ import { fileURLToPath } from 'node:url'
 
 import { deriveRequestIDs, disguiseHeaders } from './ids.js'
 
-export const ZEN_CHAT_URL = 'https://opencode.ai/zen/v1/chat/completions'
+// Overridable so the offline regression test can point the transport at a local
+// SSE server instead of the live gateway (and so a user can aim at a mirror).
+export const ZEN_CHAT_URL = process.env.OPENCODE_LOCAL_ZEN_URL || 'https://opencode.ai/zen/v1/chat/completions'
 
 const RELAY_PATH = fileURLToPath(new URL('./relay.mjs', import.meta.url))
 
@@ -163,6 +165,8 @@ export function classifyError(text) {
 /** Convert DSH-style messages (blocks) to OpenAI chat-completions messages. */
 export function toOpenAIMessages(options) {
   const out = []
+  /** Tool-call ids the previous assistant turn actually advertised (null = none yet). */
+  let expectedToolIds = null
   if (typeof options.system === 'string' && options.system.length > 0) {
     out.push({ role: 'system', content: options.system })
   }
@@ -179,19 +183,40 @@ export function toOpenAIMessages(options) {
       const assistant = { role: 'assistant' }
       if (text) assistant.content = text
       else if (!calls?.length) assistant.content = ''
-      if (Array.isArray(calls) && calls.length > 0) {
-        assistant.tool_calls = calls.map((c) => ({
-          id: c.id,
-          type: 'function',
-          function: { name: c.name, arguments: c.arguments ?? '{}' },
-        }))
+      // History is REPLAYED to the upstream on every turn, so a single
+      // malformed call turns into a permanent 400 for the rest of the session:
+      // MiniMax answers `[bad_request_error] invalid params, 400 (2013)` and no
+      // later request in that conversation can recover. Two shapes have to be
+      // filtered here, because the host has already stored them:
+      //   - a tool call with an EMPTY name (a stream fragment — the host turns
+      //     it into `unknown tool ""`),
+      //   - arguments that are not a JSON object (the host turns it into
+      //     `invalid arguments: "arguments" must be an object`).
+      const kept = []
+      if (Array.isArray(calls)) {
+        for (const c of calls) {
+          const name = typeof c?.name === 'string' ? c.name.trim() : ''
+          if (name === '') continue
+          const id = typeof c?.id === 'string' && c.id !== '' ? c.id : `call_${kept.length}`
+          kept.push({ id, type: 'function', function: { name, arguments: normaliseArgs(c?.arguments) } })
+        }
       }
+      if (kept.length > 0) assistant.tool_calls = kept
+      // Keep the expected-id set in step even when the turn is elided below, so
+      // the results of the dropped calls are dropped with them.
+      const phantomTurn = Array.isArray(calls) && calls.length > 0 && kept.length === 0
+      expectedToolIds = new Set(kept.map((k) => k.id))
+      if (phantomTurn && !text) continue
       out.push(assistant)
       continue
     }
     if (message.role === 'tool') {
+      const id = message.toolCallId ?? ''
+      // A result whose call was filtered out above would be an orphan the
+      // upstream rejects outright — drop it with the call it belonged to.
+      if (expectedToolIds !== null && !expectedToolIds.has(id)) continue
       const text = flattenText(message.content)
-      out.push({ role: 'tool', tool_call_id: message.toolCallId ?? '', content: text || '(no output)' })
+      out.push({ role: 'tool', tool_call_id: id, content: text || '(no output)' })
       continue
     }
     out.push({ role: 'user', content: userContent(message.content) })
@@ -203,6 +228,37 @@ function flattenText(content) {
   if (typeof content === 'string') return content
   if (!Array.isArray(content)) return ''
   return content.filter((b) => b?.type === 'text').map((b) => String(b.text ?? '')).join('')
+}
+
+/**
+ * Coerce a tool call's arguments to a JSON-object STRING.
+ *
+ * The upstream validates the replayed history strictly: an arguments value that
+ * is not a serialised object (a bare `}`, a truncated fragment, `null`, a
+ * number) is answered with `invalid params`. A `{}` is honest — the call fails
+ * with missing parameters, which the host can report — where the raw fragment
+ * kills the whole session.
+ */
+function normaliseArgs(args) {
+  if (typeof args === 'string') {
+    const trimmed = args.trim()
+    if (trimmed === '') return '{}'
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) return trimmed
+      return '{}'
+    } catch {
+      return '{}'
+    }
+  }
+  if (args !== null && typeof args === 'object' && !Array.isArray(args)) {
+    try {
+      return JSON.stringify(args)
+    } catch {
+      return '{}'
+    }
+  }
+  return '{}'
 }
 
 function userContent(content) {
@@ -401,6 +457,47 @@ function findSeparator(buffer) {
   return { sepAt: lf, sepLen: 2 }
 }
 
+/**
+ * Resolve the open tool-call slot a streaming delta belongs to.
+ *
+ * A logical tool call is announced ONCE with an `id` and then continued by
+ * deltas that carry only `index` (OpenAI's streaming convention). Keying the
+ * accumulator by `id ?? index` therefore splits ONE call into TWO blocks: the
+ * real one, holding the truncated arguments, plus a nameless `call_N` stub
+ * holding the tail. The stub reaches the host as `unknown tool ""`, its
+ * arguments are not a JSON object, and the replayed history then fails upstream
+ * with `invalid params`.
+ *
+ * Both keys are registered for a new slot and either one may resolve an
+ * existing slot, so id-first and index-first gateways behave the same.
+ * Exported for the offline regression test.
+ */
+export function resolveToolSlot(state, call) {
+  const id = typeof call?.id === 'string' ? call.id : ''
+  const fn = call?.function ?? {}
+  const name = typeof fn.name === 'string' ? fn.name : ''
+  const argsDelta = typeof fn.arguments === 'string' ? fn.arguments : ''
+  const upstreamIndex = typeof call?.index === 'number' ? call.index : undefined
+  const idxKey = upstreamIndex !== undefined ? `idx:${upstreamIndex}` : ''
+
+  let index
+  if (id !== '' && state.byKey.has(id)) index = state.byKey.get(id)
+  else if (idxKey !== '' && state.byKey.has(idxKey)) index = state.byKey.get(idxKey)
+  // No id, no index and no name: by definition a continuation fragment, never a
+  // new call — append it to the slot that is currently open.
+  else if (id === '' && idxKey === '' && name === '' && state.last !== undefined) index = state.last
+
+  const created = index === undefined
+  if (created) {
+    index = state.next
+    state.next += 1
+    if (id !== '') state.byKey.set(id, index)
+    if (idxKey !== '') state.byKey.set(idxKey, index)
+    state.last = index
+  }
+  return { index, created, id: id !== '' ? id : `call_${index}`, name, argsDelta }
+}
+
 /** Stream one request. Yields harness chunks; always ends with usage+finish. */
 export async function* streamChat(options, token) {
   const ids = deriveRequestIDs(options.messages)
@@ -413,40 +510,53 @@ export async function* streamChat(options, token) {
   const body = buildRequestBody(options)
   const request = { url: ZEN_CHAT_URL, method: 'POST', headers, body }
 
-  let payloads
-  try {
-    payloads = await bunRelay(request, options.signal)
-  } catch (err) {
-    if (err?.code !== 'BUN_UNAVAILABLE') throw err
-    payloads = await nodeDirect(request, options.signal)
-  }
-
-  // The relay is a GENERATOR, so its body only runs at the first iteration:
-  // a bun that is present but UNUSABLE fails INSIDE the loop, not at the
-  // call that created it. The old code only caught failures around that
-  // call, so the request failed outright instead of falling back to Node.
+  // The free lane throttles per REQUEST, not per session: the model that
+  // answers 429 `Upstream request failed: Endpoint is unavailable.` one second
+  // is served again the next. ONE bounded retry — only while nothing has been
+  // streamed to the host yet — turns most of those into a normal answer.
   //
-  // Priming the generator here surfaces that failure while the Node
-  // transport is still an option. The primed payload is replayed below, so
-  // nothing is lost. The priming happens INSIDE the main try/catch: an
-  // upstream error (a 403, a 429) must still be reported as a stream error
-  // rather than escaping as an exception.
-  let primed = null
-  let source = payloads
-  let textIndex = 0
-  let reasoningIndex = 1
-  const toolIndices = new Map()
-  let nextToolIndex = 2
-  let finishReason = null
-  let usage
-  let sawAnything = false
-  const openText = new Map()
-  const openReasoning = new Map()
-  const openTools = new Map()
+  // It is deliberately not a loop, and it never retries:
+  //   - an IP-level refusal (retrying only feeds an address the upstream has
+  //     already flagged, and the plugin is told to stop instead),
+  //   - a 4xx about the request body itself (the body will not change),
+  //   - a stream that already yielded chunks (a second answer would duplicate).
+  const MAX_ATTEMPTS = 2
+  const RETRY_DELAY_MS = 1200
 
-  try {
+  for (let attempt = 1; ; attempt += 1) {
+    let textIndex = 0
+    let reasoningIndex = 1
+    const toolState = { next: 2, byKey: new Map(), last: undefined }
+    let finishReason = null
+    let usage
+    let sawAnything = false
+    const openText = new Map()
+    const openReasoning = new Map()
+    const openTools = new Map()
+
     try {
-      primed = await payloads.next()
+      let payloads
+      try {
+        payloads = await bunRelay(request, options.signal)
+      } catch (err) {
+        if (err?.code !== 'BUN_UNAVAILABLE') throw err
+        payloads = await nodeDirect(request, options.signal)
+      }
+
+      // The relay is a GENERATOR, so its body only runs at the first iteration:
+      // a bun that is present but UNUSABLE fails INSIDE the loop, not at the
+      // call that created it. The old code only caught failures around that
+      // call, so the request failed outright instead of falling back to Node.
+      //
+      // Priming the generator here surfaces that failure while the Node
+      // transport is still an option. The primed payload is replayed below, so
+      // nothing is lost. The priming happens INSIDE the main try/catch: an
+      // upstream error (a 403, a 429) must still be reported as a stream error
+      // rather than escaping as an exception.
+      let primed = null
+      let source = payloads
+      try {
+        primed = await payloads.next()
     } catch (err) {
       if (err?.code !== 'BUN_UNAVAILABLE') throw err
       source = await nodeDirect(request, options.signal)
@@ -504,33 +614,24 @@ export async function* streamChat(options, token) {
       if (Array.isArray(calls)) {
         sawAnything = true
         for (const call of calls) {
-          const id = typeof call.id === 'string' ? call.id : ''
-          const fn = call.function ?? {}
-          const name = typeof fn.name === 'string' ? fn.name : ''
-          const argsDelta = typeof fn.arguments === 'string' ? fn.arguments : ''
-          // Some gateways stream tool calls WITHOUT an id (index only). The
-          // old code keyed the block by id, so such a call got index
-          // `undefined` and was SILENTLY DROPPED — the model asked for a
-          // tool, the host never saw it, and the stream still ended with
-          // finish_reason "tool_calls".
-          //
-          // Fall back to the upstream's own `index` when there is no id.
-          const upstreamIndex = typeof call.index === 'number' ? call.index : undefined
-          const key = id !== '' ? id : upstreamIndex !== undefined ? `idx:${upstreamIndex}` : ''
-          let index = key === '' ? undefined : toolIndices.get(key)
-          if (index === undefined) {
-            index = nextToolIndex
-            nextToolIndex += 1
-            if (key !== '') toolIndices.set(key, index)
-            const blockId = id !== '' ? id : `call_${index}`
-            openTools.set(index, { id: blockId, name, args: '' })
+          const slot = resolveToolSlot(toolState, call)
+          const index = slot.index
+          if (slot.created) {
+            // `started` stays false until the slot has a NAME: a nameless
+            // fragment must never be announced as a tool call, because the host
+            // would try to execute one called "".
+            openTools.set(index, { id: slot.id, name: slot.name, args: '', started: false })
+          }
+          const open = openTools.get(index)
+          if (!open) continue
+          if (slot.name) open.name = slot.name
+          open.args += slot.argsDelta
+          if (!open.started && open.name) {
+            open.started = true
             yield { type: 'block-start', index, blockType: 'tool-call' }
           }
-          if (index !== undefined) {
-            const open = openTools.get(index)
-            if (name) open.name = name
-            open.args += argsDelta
-            yield { type: 'tool-call-delta', index, id: open.id, name: open.name, argumentsDelta: argsDelta }
+          if (open.started) {
+            yield { type: 'tool-call-delta', index, id: open.id, name: open.name, argumentsDelta: slot.argsDelta }
           }
         }
       }
@@ -541,43 +642,65 @@ export async function* streamChat(options, token) {
         else finishReason = { kind: 'stop' }
       }
     }
-  } catch (err) {
-    if (err instanceof HttpError) {
-      const message = `opencode-local: HTTP ${err.status} ${err.text.slice(0, 300)}`
+    } catch (err) {
+      if (attempt < MAX_ATTEMPTS && !sawAnything && !options.signal?.aborted && isTransientFailure(err)) {
+        await delay(RETRY_DELAY_MS)
+        continue
+      }
+      if (err instanceof HttpError) {
+        const message = `opencode-local: HTTP ${err.status} ${err.text.slice(0, 300)}`
+        yield {
+          type: 'finish',
+          reason: { kind: 'error', failure: { message, code: classifyError(err.text || String(err.status)) } },
+        }
+        return
+      }
       yield {
         type: 'finish',
-        reason: { kind: 'error', failure: { message, code: classifyError(err.text || String(err.status)) } },
+        reason: {
+          kind: 'error',
+          failure: {
+            message: `opencode-local: stream failed: ${err?.message ?? err}`,
+            code: classifyError(String(err?.message ?? err)),
+          },
+        },
       }
       return
     }
+
+    for (const [index, text] of openText) {
+      yield { type: 'block-end', index, block: { type: 'text', text } }
+    }
+    for (const [index, text] of openReasoning) {
+      yield { type: 'block-end', index, block: { type: 'reasoning', text } }
+    }
+    for (const [index, tool] of openTools) {
+      // A slot that never received a name is a stream fragment, not a call.
+      if (!tool.started || !tool.name) continue
+      yield { type: 'block-end', index, block: { type: 'tool-call', id: tool.id, name: tool.name, arguments: tool.args || '{}' } }
+    }
+
+    if (usage) yield { type: 'usage', usage }
     yield {
       type: 'finish',
-      reason: {
-        kind: 'error',
-        failure: {
-          message: `opencode-local: stream failed: ${err?.message ?? err}`,
-          code: classifyError(String(err?.message ?? err)),
-        },
-      },
+      reason: finishReason ?? (sawAnything ? { kind: 'stop' } : { kind: 'error', failure: { message: 'opencode-local: stream ended without content', code: 'EMPTY_RESPONSE' } }),
     }
     return
   }
+}
 
-  for (const [index, text] of openText) {
-    yield { type: 'block-end', index, block: { type: 'text', text } }
-  }
-  for (const [index, text] of openReasoning) {
-    yield { type: 'block-end', index, block: { type: 'reasoning', text } }
-  }
-  for (const [index, tool] of openTools) {
-    yield { type: 'block-end', index, block: { type: 'tool-call', id: tool.id, name: tool.name, arguments: tool.args || '{}' } }
-  }
+/**
+ * A failure worth ONE retry: the lane refused the request, not the request
+ * itself. An IP-level lane closure is excluded — it is not a throttle.
+ */
+function isTransientFailure(err) {
+  if (!(err instanceof HttpError)) return false
+  if (err.status !== 429 && !(err.status >= 500 && err.status <= 599)) return false
+  return !isIpLaneBlocked(err.text ?? '')
+}
 
-  if (usage) yield { type: 'usage', usage }
-  yield {
-    type: 'finish',
-    reason: finishReason ?? (sawAnything ? { kind: 'stop' } : { kind: 'error', failure: { message: 'opencode-local: stream ended without content', code: 'EMPTY_RESPONSE' } }),
-  }
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function num(v) {

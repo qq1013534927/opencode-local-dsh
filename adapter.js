@@ -529,13 +529,22 @@ export class OpenCodeLocalAdapter {
 
   resolveModel(provider, model) {
     const info = this.#modelInfo(model)
+    // The host validates this object strictly and REFUSES the whole provider
+    // when one model is off (`adapter returned invalid context metadata …`,
+    // LlmError INVALID_MODEL_CONTEXT): contextWindow must be a POSITIVE INTEGER
+    // and defaultMaxTokens a positive safe integer. A catalog that has not
+    // refreshed yet, an upstream that reports no limit, or a settings override
+    // left at 0 all produce `undefined`/`0` here — the metadata is normalised to
+    // the default instead of taking the model list down with it.
+    const contextWindow = positiveInt(info.contextWindow) ?? DEFAULT_CONTEXT_WINDOW
+    const maxOutput = Math.min(positiveInt(info.maxOutput) ?? DEFAULT_MAX_TOKENS, contextWindow)
     const resolved = {
       provider,
       id: model,
       name: model,
       inputModalities: info.inputModalities.includes('image') ? ['text', 'image'] : ['text'],
-      context: { contextWindow: info.contextWindow },
-      defaultMaxTokens: info.maxOutput,
+      context: { contextWindow },
+      defaultMaxTokens: maxOutput,
     }
     const efforts = reasoningEfforts({ reasoning: info.reasoning, effortValues: info.effortValues })
     if (efforts) resolved.reasoning = { efforts }
@@ -615,3 +624,18 @@ export class OpenCodeLocalAdapter {
     }
   }
 }
+
+/**
+ * `v` as a positive integer, or `undefined` when it is not one.
+ *
+ * The host's model-metadata contract is `Number.isInteger(contextWindow)` and
+ * `contextWindow > 0`; `0`, `NaN`, `1.5` and `"200000"` must all collapse to
+ * "unknown" so the caller can substitute a default.
+ */
+function positiveInt(v) {
+  const n = typeof v === 'number' ? v : Number(v)
+  if (!Number.isFinite(n)) return undefined
+  const i = Math.trunc(n)
+  return i > 0 ? i : undefined
+}
+
